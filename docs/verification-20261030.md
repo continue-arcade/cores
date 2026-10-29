@@ -5,6 +5,7 @@
 - 首批 12 个行为测试在脚本不存在时全部以断言失败；实现后通过。
 - macOS 自身 install name 误判作为真实构建发现的问题，新增两个回归测试先失败后修正；共 14 项通过。
 - 再补全目标集合、来源归档和持久全发布报告的集成覆盖，共 15 项通过。
+- 独立 review 的三个 P2（源码归档绑定/结构身份、准备后的配方变更、独立 Cart 版本序列）分别补失败测试，修正后共 18 项通过。
 - 固定 Python 3.12.9、CMake 3.31.6 安装后，`mise run test` 通过且无资源泄漏警告。
 - 本机 `macos-aarch64`，配方 commit `8303715e5de9faeb18661ff13779d232462db6fb`，正式源码 SHA `26b7884bc25a5933960f3cdcd98bac1ae14d42e2` 原生编译并打包成功。
 - libretro 25 个标准入口可解析，API 1，library_name `mGBA`，library_version `0.10.5`，支持扩展 `gba|gb|gbc|sgb`。

@@ -21,13 +21,16 @@ mise run core-release -- verify dist
 mise run core-release -- publish dist
 ```
 
-`prepare` 要求配方已提交；`build` 要求 checkout 与锁中的配方 commit 一致。
+`prepare` 要求配方已提交；`build` 与 `publish` 都要求 tracked 工作区干净，checkout 与锁中的配方 commit 一致，
+并逐项核对脚本、登记、mise 配置和工作流的实际 SHA-256 与提交内容。
 每次使用新输出目录，已有包与工作目录不静默替换。
 `check` 无新正式版时以 0 退出，输出 `update:false`；API、限流、网络或解析失败非零退出。
 只读取 `mgba-emu/mgba` 的正式 Release，排除 draft、prerelease 和不匹配三段稳定版号的 tag。
 与已公开 `release-report.json` 比较，所有已采用 tag 都审计是否移动；不依赖 Actions cache。
 长时间未运行时只构建最新未采用正式版，不补发已过时的版本。
-新上游版本默认采用同号 Cart；首次 smoke 映射在 registry 中明确登记。
+Cart 使用独立序列：首次 smoke 映射在 registry 明确登记；之后从全部已发布 Cart 的 SemVer 最大值推进。
+最大值若为 prerelease，下一次采用同一基础版本的正式版；最大值若为正式版，则 patch 加一。
+例如 smoke 0.1.0-smoke.1 → 0.1.0，人工维护发布 0.1.9 后的新 Core → 0.1.10；不会因上游版本较小而降级或撞号。
 人工修正打包可显式 `prepare --cart-version` 使用新的 Cart 版本，不会由定时任务自动触发。
 
 ## 构建与证据
@@ -37,6 +40,8 @@ mise run core-release -- publish dist
 mGBA 源码包含其嵌入第三方实现，Release 的对应源码归档保留所有原始源文件、版权与许可。
 每包含 mGBA MPL-2.0 `LICENSE`、对应源码获取说明 `SOURCE.md`、实际构建报告。
 Release 同时附完整 `git archive` 源码，方便获取精确对应源码和第三方许可。
+源码归档 SHA-256 与大小由每个原生构建写入其包内外报告，汇总时必须全部一致。
+验收会实际读取 tar.gz，核对安全路径、文件类型、git archive 全局 commit 标识、version.cmake 的 Core 版本及必需源码/许可文件。
 本仓自己的脚本采用 MIT，不改变 mGBA 和其第三方许可。
 
 CMake/Python 版本由 mise 固定。Windows 使用 VS 2022 x64、静态 MSVC runtime；

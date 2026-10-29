@@ -11,6 +11,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tomllib
 import urllib.error
 import urllib.parse
@@ -24,6 +25,7 @@ TARGETS = REGISTRY['targets']
 CART_ID = 'org.continue.core.mgba'
 RESOURCE_ID = 'org.continue.resource.core.mgba'
 STABLE = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')
+RECIPE_FILES = ('scripts/core_release.py', 'registry/mgba.json', 'mise.toml', '.github/workflows/release.yml')
 SEMVER = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$')
 
 class ReleaseError(Exception):
@@ -125,8 +127,34 @@ def published_sources():
         except (OSError, ValueError) as error:
             raise ReleaseError('持久发布账本读取失败') from error
         require(report['lock']['source']['repo'] == REGISTRY['upstream_repo'], '账本来源不符')
-        sources.append(report['lock']['source'])
+        sources.append({**report['lock']['source'], 'cart_version':report['lock']['cart_version']})
     return sources
+
+def cart_version_key(value):
+    require(SEMVER.fullmatch(value), 'Cart 账本 SemVer 无效')
+    base, _, pre = value.partition('-')
+    identifiers = tuple((0, int(x)) if x.isdigit() else (1, x) for x in pre.split('.')) if pre else ()
+    require(not pre or all(x and (not x.isdigit() or x == '0' or not x.startswith('0')) for x in pre.split('.')), 'Cart prerelease 无效')
+    return (*map(int, base.split('.')), 0 if pre else 1, identifiers)
+
+
+def allocate_cart_version(adopted):
+    if not adopted:
+        return REGISTRY['bootstrap']['cart_version']
+    latest = max((p['cart_version'] for p in adopted), key=cart_version_key)
+    major, minor, patch, stable, _ = cart_version_key(latest)
+    return f'{major}.{minor}.{patch + 1 if stable else patch}'
+
+
+def require_recipe_checkout(lock, root=ROOT):
+    root = Path(root)
+    require(run(['git', 'rev-parse', 'HEAD'], root) == lock['recipe']['commit'], '配方 commit 与输入锁不符')
+    require(not run(['git', 'status', '--porcelain', '--untracked-files=no'], root), '配方工作区已有未提交改动')
+    for name, expected in lock['recipe']['files'].items():
+        require(sha256(root/name) == expected, f'配方文件摘要不符: {name}')
+        committed = subprocess.run(['git', 'show', f'HEAD:{name}'], cwd=root, stdout=subprocess.PIPE, check=True).stdout
+        require(digest(committed) == expected, f'配方文件与提交内容不符: {name}')
+
 
 def make_lock(tag, sha, cart_version, recipe_commit):
     lock = {'schema': 'continue.core-release.v1', 'cart_id': CART_ID,
@@ -134,7 +162,8 @@ def make_lock(tag, sha, cart_version, recipe_commit):
             'release_tag': 'mgba/v' + cart_version,
             'source': {'repo': REGISTRY['upstream_repo'], 'tag': tag, 'version': tag, 'sha': sha},
             'recipe': {'revision': REGISTRY['recipe_revision'], 'commit': recipe_commit,
-                       'cmake_options': REGISTRY['cmake_options']},
+                       'cmake_options': REGISTRY['cmake_options'],
+                       'files':{name:sha256(ROOT/name) for name in RECIPE_FILES}},
             'targets': TARGETS}
     validate_lock(lock)
     return lock
@@ -151,7 +180,9 @@ def validate_lock(lock):
     require(lock['targets'] == TARGETS, '目标集合不符')
     require(lock['recipe']['cmake_options'] == REGISTRY['cmake_options']
             and lock['recipe']['revision'] == REGISTRY['recipe_revision']
-            and re.fullmatch('[0-9a-f]{40}', lock['recipe']['commit']), '构建配方不符')
+            and re.fullmatch('[0-9a-f]{40}', lock['recipe']['commit'])
+            and set(lock['recipe']['files']) == set(RECIPE_FILES)
+            and all(re.fullmatch('[0-9a-f]{64}', h) for h in lock['recipe']['files'].values()), '构建配方不符')
 
 def prepare(tag, cart_version, output):
     release = api(f'repos/{REGISTRY["upstream_repo"]}/releases/tags/{tag}')
@@ -159,6 +190,9 @@ def prepare(tag, cart_version, output):
     commit = run(['git', 'rev-parse', 'HEAD'], ROOT)
     require(not run(['git', 'status', '--porcelain', '--untracked-files=no'], ROOT), '准备发布前必须提交配方改动')
     lock = make_lock(tag, resolve_tag(tag), cart_version, commit)
+    require_recipe_checkout(lock)
+    prior = published_sources()
+    require(not prior or cart_version_key(cart_version) > max(cart_version_key(p['cart_version']) for p in prior), '新 Cart 版本必须大于所有已发布版本')
     write_json(output, lock)
     return lock
 
@@ -282,6 +316,30 @@ def verify_package(path, report, lock):
         require(set(names) == expected, '包内出现未登记文件')
     return report
 
+def verify_source_archive(archive_path, lock, reports):
+    expected = {'file':archive_path.name, 'sha256':sha256(archive_path), 'size_bytes':archive_path.stat().st_size}
+    require(all(r['evidence'].get('source_archive') == expected for r in reports), '源码归档与逐目标构建报告摘要不符')
+    try:
+        with tarfile.open(archive_path, 'r:gz') as archive:
+            members = archive.getmembers()
+            names = [m.name for m in members]
+            require(len(names) == len(set(names)) and len(names) < 100000, '源码归档路径重复或过多')
+            require(all((m.name == 'mgba' or m.name.startswith('mgba/')) and '..' not in m.name.split('/')
+                        and '\\' not in m.name and (m.isfile() or m.isdir()) for m in members), '源码归档路径或类型不安全')
+            require(archive.pax_headers.get('comment') == lock['source']['sha'], '源码归档 commit 身份不符')
+            required = ['mgba/version.cmake', 'mgba/CMakeLists.txt', 'mgba/LICENSE',
+                        'mgba/src/third-party/inih/LICENSE.txt', 'mgba/src/third-party/blip_buf/license.txt']
+            require(all(name in names for name in required), '源码归档缺少正式构建源码或许可')
+            require(sum(m.size for m in members) <= 1024*1024*1024, '源码归档展开大小超限')
+            version_file = archive.extractfile('mgba/version.cmake').read().decode()
+            actual = '.'.join(re.search(r'set\(LIB_VERSION_' + part + r'\s+(\d+)\)', version_file)[1] for part in ('MAJOR', 'MINOR', 'PATCH'))
+            require(actual == lock['source']['version'], '源码归档 Core 版本身份不符')
+            require(b'Mozilla Public License' in archive.extractfile('mgba/LICENSE').read(), '源码归档许可不符')
+    except (tarfile.TarError, OSError, KeyError, AttributeError, TypeError) as error:
+        raise ReleaseError('源码归档格式或身份无效') from error
+    return expected
+
+
 def verify_release(directory):
     directory = Path(directory)
     lock = json.loads((directory / 'input-lock.json').read_text())
@@ -294,7 +352,7 @@ def verify_release(directory):
     archive = directory / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
     require(archive.is_file(), '发布缺失对应源码归档')
     summary = {'schema': 'continue.core-release-report.v1', 'lock': lock, 'artifacts': reports,
-               'source_archive': {'file': archive.name, 'sha256': sha256(archive), 'size_bytes': archive.stat().st_size}}
+               'source_archive': verify_source_archive(archive, lock, reports)}
     existing = directory / 'release-report.json'
     if existing.exists():
         require(json.loads(existing.read_text()) == summary, '已有全发布报告与当前输入不符')
@@ -356,7 +414,7 @@ def build(lock_path, target, output):
     lock = json.loads(Path(lock_path).read_text())
     validate_lock(lock)
     require(native_target() == target, f'必须在对应原生目标构建: 本机 {native_target()}, 请求 {target}')
-    require(run(['git', 'rev-parse', 'HEAD'], ROOT) == lock['recipe']['commit'], '配方 commit 与输入锁不符')
+    require_recipe_checkout(lock)
     require(resolve_tag(lock['source']['tag']) == lock['source']['sha'], '准备后来源 tag 移动')
     work = ROOT / 'work' / target
     require(not work.exists(), '构建目录已存在；请显式移除 work 后重试')
@@ -401,6 +459,7 @@ def build(lock_path, target, output):
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
     run(['git', '-C', source, 'archive', '--format=tar.gz', '--prefix=mgba/', '--output', archive.resolve(), 'HEAD'])
+    evidence['source_archive'] = {'file':archive.name, 'sha256':sha256(archive), 'size_bytes':archive.stat().st_size}
     license_bundle = work / 'LICENSE'
     notice_paths = [source/'LICENSE', source/'src/third-party/inih/LICENSE.txt',
                     source/'src/third-party/blip_buf/license.txt']
@@ -423,6 +482,7 @@ def publish(directory):
     directory = Path(directory)
     summary = verify_release(directory)
     lock = summary['lock']
+    require_recipe_checkout(lock)
     repo = REGISTRY['release_repo']
     tag = lock['release_tag']
     # 发布只接受有明确发布保护的平台；每次真正发布前再次审计来源。
@@ -432,6 +492,8 @@ def publish(directory):
     expected_names |= {'input-lock.json', 'release-report.json', 'SHA256SUMS', summary['source_archive']['file']}
     require({p.name for p in files} == expected_names, '发布目录有未登记文件')
     expected = {p.name: sha256(p) for p in files}
+    adopted = published_sources()
+    require(not adopted or cart_version_key(lock['cart_version']) > max(cart_version_key(p['cart_version']) for p in adopted), '新 Cart 版本必须大于所有已发布版本，拒绝覆盖或降级')
     existing = api(f'repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe="")}', missing_ok=True)
     missing = validate_publication(existing, expected)
     if existing is None:
@@ -474,10 +536,11 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'check':
-            candidate = select_candidate(pages(f'repos/{REGISTRY["upstream_repo"]}/releases'), published_sources(), resolve_tag)
+            adopted = published_sources()
+            candidate = select_candidate(pages(f'repos/{REGISTRY["upstream_repo"]}/releases'), adopted, resolve_tag)
             result = {'update': candidate is not None, 'candidate':candidate}
             if candidate:
-                result['cart_version'] = REGISTRY['bootstrap']['cart_version'] if candidate['tag'] == REGISTRY['bootstrap']['tag'] else candidate['tag']
+                result['cart_version'] = allocate_cart_version(adopted)
             write_json(args.output, result)
             if os.environ.get('GITHUB_OUTPUT'):
                 with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -485,7 +548,7 @@ def main():
                     if candidate:
                         output.write(f'version={candidate["tag"]}\ncart_version={result["cart_version"]}\n')
         elif args.command == 'prepare':
-            cart = args.cart_version or (REGISTRY['bootstrap']['cart_version'] if args.version == REGISTRY['bootstrap']['tag'] else args.version)
+            cart = args.cart_version or allocate_cart_version(published_sources())
             result = prepare(args.version, cart, args.output)
         elif args.command == 'build':
             result = build(args.input_lock, args.target, args.output)

@@ -1,5 +1,9 @@
 """发布策略与真实 ZIP 包验证；不依赖网络或产品仓库。"""
 import copy
+import hashlib
+import io
+import subprocess
+import tarfile
 import importlib.util
 import json
 import struct
@@ -60,6 +64,33 @@ class ReleasePolicyTests(unittest.TestCase):
         existing['assets'][0]['digest'] = 'sha256:' + '1'*64
         self.assertEqual(core.validate_publication(existing, {'a.cart': '1'*64}), [])
 
+class ReviewRegressionTests(unittest.TestCase):
+    def test_new_source_cart_version_follows_maintenance_release(self):
+        self.assertTrue(hasattr(core, 'allocate_cart_version'), '未实现独立 Cart 版本分配')
+        self.assertEqual(core.allocate_cart_version([{'cart_version':'0.1.0-smoke.1'}]), '0.1.0')
+        self.assertEqual(core.allocate_cart_version([{'cart_version':'1.2.9'}, {'cart_version':'1.2.10'}]), '1.2.11')
+        self.assertEqual(core.allocate_cart_version([{'cart_version':'2.0.0-rc.1'}, {'cart_version':'1.99.1'}]), '2.0.0')
+
+    def test_dirty_recipe_and_changed_recipe_commit_are_rejected(self):
+        self.assertTrue(hasattr(core, 'require_recipe_checkout'), '缺少构建与发布前配方核验')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git','init','-q',root], check=True)
+            file = root/'recipe.py'
+            file.write_text('original')
+            subprocess.run(['git','-C',root,'add','.'], check=True)
+            subprocess.run(['git','-C',root,'-c','user.name=Test','-c','user.email=test@example.com','commit','-qm','fixture'], check=True)
+            commit = subprocess.check_output(['git','-C',root,'rev-parse','HEAD'],text=True).strip()
+            lock = {'recipe':{'commit':commit, 'files':{'recipe.py':hashlib.sha256(b'original').hexdigest()}}}
+            core.require_recipe_checkout(lock, root)
+            file.write_text('modified')
+            with self.assertRaisesRegex(core.ReleaseError, '配方|工作区'):
+                core.require_recipe_checkout(lock, root)
+            file.write_text('original')
+            lock['recipe']['commit'] = 'a'*40
+            with self.assertRaisesRegex(core.ReleaseError, '配方'):
+                core.require_recipe_checkout(lock, root)
+
 class DependencyTests(unittest.TestCase):
     def test_macos_install_name_is_not_an_external_dependency(self):
         listing = 'core:\n\tmgba_libretro.dylib (compatibility version 0.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)'
@@ -85,8 +116,21 @@ class PackageTests(unittest.TestCase):
         # 真实容器头供目标核验；原生 ABI 冒烟由 build 执行。
         self.binary = self.root / 'mgba.dylib'
         self.binary.write_bytes(struct.pack('<IIII', 0xfeedfacf, 0x0100000c, 0, 6) + b'\0'*48)
+        self.archive = self.root / f'mgba-source-{SHA}.tar.gz'
+        with tarfile.open(self.archive, 'w:gz', format=tarfile.PAX_FORMAT, pax_headers={'comment': SHA}) as archive:
+            files = {'mgba/version.cmake': 'set(LIB_VERSION_MAJOR 0)\nset(LIB_VERSION_MINOR 10)\nset(LIB_VERSION_PATCH 5)',
+                     'mgba/CMakeLists.txt': 'project(mGBA)', 'mgba/LICENSE': 'Mozilla Public License Version 2.0',
+                     'mgba/src/third-party/inih/LICENSE.txt': 'BSD license',
+                     'mgba/src/third-party/blip_buf/license.txt': 'GNU LESSER GENERAL PUBLIC LICENSE'}
+            for name, data in files.items():
+                data = data.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
         self.evidence = {'compiler': 'fixture compiler', 'dependencies': 'fixture system only',
-                         'abi': {'retro_api_version': 1}, 'cmake_cache': 'fixture'}
+                         'abi': {'retro_api_version': 1}, 'cmake_cache': 'fixture',
+                         'source_archive': {'file':self.archive.name, 'sha256':hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+                                            'size_bytes':self.archive.stat().st_size}}
 
     def package(self):
         return core.package(self.lock, 'macos-aarch64', self.binary, self.license,
@@ -158,14 +202,32 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(core.ReleaseError, '源码归档'):
             core.verify_release(out)
         archive = out / f'mgba-source-{SHA}.tar.gz'
-        archive.write_bytes(b'fixture source archive')
+        archive.write_bytes(self.archive.read_bytes())
         result = core.verify_release(out)
         self.assertEqual({r['target'] for r in result['artifacts']}, set(TARGETS))
-        self.assertEqual(result['source_archive']['sha256'], hashlib.sha256(b'fixture source archive').hexdigest())
+        self.assertEqual(result['source_archive']['sha256'], hashlib.sha256(self.archive.read_bytes()).hexdigest())
         self.assertEqual(json.loads((out/'release-report.json').read_text())['lock']['source']['sha'], SHA)
         self.assertIn('release-report.json', (out/'SHA256SUMS').read_text())
         archive.write_bytes(b'changed source archive')
-        with self.assertRaisesRegex(core.ReleaseError, '全发布报告'):
+        with self.assertRaisesRegex(core.ReleaseError, '归档|全发布报告'):
+            core.verify_release(out)
+
+    def test_arbitrary_source_bytes_are_rejected_even_with_matching_report_digest(self):
+        out = self.root / 'out'
+        out.mkdir()
+        archive = out / self.archive.name
+        archive.write_bytes(b'not an archive')
+        # 构建报告也一致时仍必须核验真实归档结构和源码身份。
+        self.evidence['source_archive'] = {'file':archive.name, 'sha256':hashlib.sha256(archive.read_bytes()).hexdigest(), 'size_bytes':archive.stat().st_size}
+        for target in TARGETS:
+            if target.startswith('linux'):
+                data = bytearray(64); data[:6] = b'\x7fELF\x02\x01'; struct.pack_into('<H', data, 18, 62)
+                self.binary.write_bytes(data)
+            elif target.startswith('windows'):
+                data = bytearray(128); data[:2] = b'MZ'; struct.pack_into('<I', data, 60, 64); data[64:68] = b'PE\0\0'; struct.pack_into('<H', data, 68, 0x8664)
+                self.binary.write_bytes(data)
+            core.package(self.lock, target, self.binary, self.license, self.evidence, out)
+        with self.assertRaisesRegex(core.ReleaseError, '归档'):
             core.verify_release(out)
 
     def test_source_pin_cannot_be_mutated(self):
