@@ -140,6 +140,34 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(core.ReleaseError, '目标集合'):
             core.verify_release(self.root/'out')
 
+    def test_complete_release_requires_source_and_generates_persistent_audit(self):
+        import hashlib
+        out = self.root / 'out'
+        self.package()
+        elf = bytearray(64)
+        elf[:6] = b'\x7fELF\x02\x01'
+        struct.pack_into('<H', elf, 18, 62)
+        pe = bytearray(128)
+        pe[:2] = b'MZ'
+        struct.pack_into('<I', pe, 60, 64)
+        pe[64:68] = b'PE\0\0'
+        struct.pack_into('<H', pe, 68, 0x8664)
+        for target, data in [('linux-x86_64', elf), ('windows-x86_64', pe)]:
+            self.binary.write_bytes(data)
+            core.package(self.lock, target, self.binary, self.license, self.evidence, out)
+        with self.assertRaisesRegex(core.ReleaseError, '源码归档'):
+            core.verify_release(out)
+        archive = out / f'mgba-source-{SHA}.tar.gz'
+        archive.write_bytes(b'fixture source archive')
+        result = core.verify_release(out)
+        self.assertEqual({r['target'] for r in result['artifacts']}, set(TARGETS))
+        self.assertEqual(result['source_archive']['sha256'], hashlib.sha256(b'fixture source archive').hexdigest())
+        self.assertEqual(json.loads((out/'release-report.json').read_text())['lock']['source']['sha'], SHA)
+        self.assertIn('release-report.json', (out/'SHA256SUMS').read_text())
+        archive.write_bytes(b'changed source archive')
+        with self.assertRaisesRegex(core.ReleaseError, '全发布报告'):
+            core.verify_release(out)
+
     def test_source_pin_cannot_be_mutated(self):
         lock = copy.deepcopy(self.lock)
         lock['source']['sha'] = 'b'*40
