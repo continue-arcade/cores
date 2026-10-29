@@ -14,9 +14,6 @@ on:
         required: true
 permissions:
   contents: read
-concurrency:
-  group: core-release-${{ inputs.core }}
-  cancel-in-progress: false
 jobs:
   check:
     runs-on: ubuntu-24.04
@@ -101,6 +98,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   publish:
+    concurrency:
+      group: core-publish-${{ inputs.core }}
+      cancel-in-progress: false
     needs: [check, build]
     if: needs.check.outputs.update == 'true'
     runs-on: ubuntu-24.04

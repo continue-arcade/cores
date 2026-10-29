@@ -28,7 +28,11 @@ def build_native(core, registry, lock, target, source, build_dir, run):
     elif core == 'mesen':
         if target.startswith('windows'):
             msbuild=shutil.which('MSBuild.exe') or str(Path(os.environ['VSINSTALLDIR'])/'MSBuild/Current/Bin/MSBuild.exe')
-            logs['build_log']=run([msbuild,source/'Libretro/Libretro.vcxproj','/m:3','/t:Build','/p:Configuration=Libretro','/p:Platform=x64','/p:PlatformToolset=v143',f'/p:OutDir={build_dir}{os.sep}',f'/p:IntDir={build_dir / "obj"}{os.sep}'])
+            # Libretro.vcxproj 的依赖在 .sln 中声明；逐项构建三个静态库，保持独立 PCH 目录。
+            messages=[]
+            for project in ['Core','Utilities','SevenZip','Libretro']:
+                messages.append(run([msbuild,source/project/(project+'.vcxproj'),'/m:3','/t:Build','/p:Configuration=Libretro','/p:Platform=x64','/p:PlatformToolset=v143',f'/p:SolutionDir={source}{os.sep}',f'/p:OutDir={build_dir}{os.sep}',f'/p:IntDir={build_dir / "obj" / project}{os.sep}']))
+            logs['build_log']='\n'.join(messages)
             search=build_dir
         else:
             args=['make','-C',source/'Libretro','-j3','platform=osx' if target.startswith('macos') else 'platform=unix']
