@@ -190,6 +190,20 @@ def require_recipe_checkout(lock, root=ROOT):
         require(digest(committed) == expected, f'配方文件与提交内容不符: {name}')
 
 
+
+def ensure_recipe_reference(lock, remote=api):
+    # GitHub 对已离开分支头且更改过 workflow 的 SHA 限制发版；构建开始前保留可校验引用。
+    commit=lock['recipe']['commit']
+    require(re.fullmatch('[0-9a-f]{40}',commit),'配方 SHA 无效')
+    name='heads/codex/core-recipe-'+commit
+    repo=REGISTRY['release_repo']
+    reference=remote(f'repos/{repo}/git/ref/{name}',missing_ok=True)
+    if reference is None:
+        reference=remote(f'repos/{repo}/git/refs','POST',{'ref':'refs/'+name,'sha':commit})
+    require(reference.get('object',{}).get('type')=='commit' and reference['object']['sha']==commit,'配方引用与锁定提交不符')
+    return reference
+
+
 def make_lock(tag, sha, cart_version, recipe_commit):
     lock = {'schema': 'continue.core-release.v1', 'cart_id': CART_ID,
             'resource_id': RESOURCE_ID, 'cart_version': cart_version,
@@ -227,6 +241,7 @@ def prepare(tag, cart_version, output):
     require_recipe_checkout(lock)
     prior = published_sources()
     require(not prior or cart_version_key(cart_version) > max(cart_version_key(p['cart_version']) for p in prior), '新 Cart 版本必须大于所有已发布版本')
+    ensure_recipe_reference(lock)
     write_json(output, lock)
     return lock
 

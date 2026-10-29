@@ -16,6 +16,9 @@ permissions:
   contents: read
 jobs:
   check:
+    # prepare 只执行受控元数据脚本，写入配方引用；上游原生构建 job 仍只读。
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     outputs:
       update: ${{ steps.check.outputs.update }}

@@ -105,3 +105,22 @@ class WorkflowIdentityTests(unittest.TestCase):
         lock=core.make_lock('v1.20.4',core.REGISTRY['bootstrap']['sha'],'0.1.0-smoke.1','a'*40)
         with self.assertRaisesRegex(core.ReleaseError,'Core.*不符'):
             core.activate_lock(lock,'mesen')
+
+class RecipeReferenceTests(unittest.TestCase):
+    def test_recipe_reference_is_idempotent_and_refuses_moved_commit(self):
+        self.assertTrue(hasattr(core,'ensure_recipe_reference'),'长构建尚未锚定配方提交')
+        core.select_core('mgba')
+        lock=core.make_lock('0.10.5',core.REGISTRY['bootstrap']['sha'],'0.2.0','a'*40)
+        refs={}
+        def remote(path, method='GET', body=None, missing_ok=False):
+            if method=='POST':
+                refs[body['ref']]={'ref':body['ref'],'object':{'type':'commit','sha':body['sha']}}
+                return refs[body['ref']]
+            return refs.get('refs/'+path.split('/git/ref/')[1])
+        first=core.ensure_recipe_reference(lock,remote)
+        self.assertEqual(first['object']['sha'],'a'*40)
+        self.assertEqual(core.ensure_recipe_reference(lock,remote),first)
+        self.assertEqual(len(refs),1)
+        first['object']['sha']='b'*40
+        with self.assertRaisesRegex(core.ReleaseError,'引用.*不符'):
+            core.ensure_recipe_reference(lock,remote)
