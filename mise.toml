@@ -1,0 +1,9 @@
+[tools]
+python = "3.12.9"
+cmake = "3.31.6"
+
+[tasks.test]
+run = "python -W error::ResourceWarning -m unittest discover -s tests -v"
+
+[tasks.core-release]
+run = "python scripts/core_release.py"

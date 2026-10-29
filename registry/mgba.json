@@ -1,0 +1,23 @@
+{
+  "upstream_repo": "mgba-emu/mgba",
+  "release_repo": "continue-arcade/cores",
+  "bootstrap": {
+    "tag": "0.10.5",
+    "sha": "26b7884bc25a5933960f3cdcd98bac1ae14d42e2",
+    "cart_version": "0.1.0-smoke.1"
+  },
+  "targets": ["macos-aarch64", "windows-x86_64", "linux-x86_64"],
+  "recipe_revision": 1,
+  "cmake_options": {
+    "BUILD_LIBRETRO": "ON", "BUILD_QT": "OFF", "BUILD_SDL": "OFF",
+    "BUILD_SHARED": "OFF", "BUILD_STATIC": "OFF", "BUILD_LTO": "OFF",
+    "BUILD_GL": "OFF", "BUILD_GLES2": "OFF", "BUILD_GLES3": "OFF",
+    "USE_FFMPEG": "OFF", "USE_ZLIB": "OFF", "USE_MINIZIP": "OFF",
+    "USE_PNG": "OFF", "USE_LIBZIP": "OFF", "USE_SQLITE3": "OFF",
+    "USE_ELF": "OFF", "USE_LUA": "OFF", "USE_LZMA": "OFF",
+    "USE_DISCORD_RPC": "OFF", "USE_EDITLINE": "OFF", "USE_EPOXY": "OFF",
+    "USE_DEBUGGERS": "OFF", "USE_GDB_STUB": "OFF",
+    "BUILD_TEST": "OFF", "BUILD_SUITE": "OFF", "BUILD_PERF": "OFF",
+    "CMAKE_BUILD_TYPE": "Release", "CMAKE_SKIP_RPATH": "ON"
+  }
+}
