@@ -1,0 +1,2 @@
+# 配方摘要按 Git blob 原始字节核验；所有文本 checkout 固定 LF。
+* text=auto eol=lf
