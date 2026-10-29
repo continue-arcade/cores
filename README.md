@@ -1,6 +1,6 @@
 # Continue Core 生产仓库
 
-从 mGBA 官方**正式 Release 的完整源码 SHA**构建 Continue Arcade 使用的 libretro Core Cart。
+从各 Core 官方**正式 Release 的完整源码 SHA**构建 Continue Arcade 使用的 Libretro Core Cart。
 本仓库独立运行，Python 只使用标准库，不读取 Continue 产品私有仓库。
 
 首次试运行：Core **0.10.5**，SHA `26b7884bc25a5933960f3cdcd98bac1ae14d42e2`；
@@ -25,7 +25,7 @@ mise run core-release -- publish dist
 并逐项核对脚本、登记、mise 配置和工作流的实际 SHA-256 与提交内容。
 每次使用新输出目录，已有包与工作目录不静默替换。
 `check` 无新正式版时以 0 退出，输出 `update:false`；API、限流、网络或解析失败非零退出。
-只读取 `mgba-emu/mgba` 的正式 Release，排除 draft、prerelease 和不匹配三段稳定版号的 tag。
+读取每个 `registry/<core>.json` 登记上游的正式 Release；排除 draft、prerelease 和不匹配该 Core 稳定 tag 规则的版本。上游单段版本（bsnes v115）规范化为资源版本 115.0.0，原始 tag 和 ABI 版本仍单独保留。
 与已公开 `release-report.json` 比较，所有已采用 tag 都审计是否移动；不依赖 Actions cache。
 长时间未运行时只构建最新未采用正式版，不补发已过时的版本。
 Cart 使用独立序列：首次 smoke 映射在 registry 明确登记；之后从全部已发布 Cart 的 SemVer 最大值推进。
@@ -58,7 +58,7 @@ macOS/aarch64 实测仅依赖 **Foundation.framework** 和 **libSystem.B.dylib**
 
 ## Actions 与不可变发布
 
-同一 workflow 由每日 schedule 或 workflow_dispatch 触发：check → prepare → 三目标 matrix → verify → publish。
+`all-releases.yml` 每日或手动检查全部登记 Core；`release.yml` 是可复用的单 Core 工作流，也可手动选择 Core：check → prepare → 三目标 matrix → verify → publish。
 上游其他仓库的 `release` 事件不会自动触发本仓库；这里不依赖跨仓 `on: release`。
 工作流的第三方 Actions 均固定完整 commit；构建 job 仅 contents:read，发布 job 为 contents:write。
 仓库首次设置必须启用 GitHub immutable releases，再启用正式发布：
@@ -79,3 +79,31 @@ GitHub immutable 功能锁定公开 tag 和资产，脚本还检查发布响应�
 [试发布 Cart 0.1.0-smoke.1](https://github.com/continue-arcade/cores/releases/tag/mgba/v0.1.0-smoke.1) 已公开，prerelease=true、immutable=true，共 10 个资产。
 [三平台成功工作流](https://github.com/continue-arcade/cores/actions/runs/40929193047)，构建配方 commit `7f119ec`。
 发布后本地检测返回 `update:false`，[CI 再次运行](https://github.com/continue-arcade/cores/actions/runs/40929847081) 确认 check 成功、build/publish 均 skipped；完整实际构建差异与验证范围见 [验证记录](docs/verification-20261030.md)。
+
+
+## 新增 NES / SNES / PSP
+
+| 游戏系统 | Core | 固定正式来源 | 说明 |
+| --- | --- | --- | --- |
+| NES | Mesen | SourMesen/Mesen 0.9.9 | 官方历史分支已停止支持；Mesen2 未提供同样的 Libretro 构建入口，不混用版本 |
+| SNES | bsnes | bsnes-emu/bsnes v115 | GPLv3-only；普通 SNES 内容不需要外部 BIOS |
+| PSP | PPSSPP | hrydgard/ppsspp v1.20.4 | 固定递归子模块，完整 assets 随包放入 system/PPSSPP |
+
+三个 Core 初次 Cart 都使用各自的 `0.1.0-smoke.1` 独立试运行版本；发布状态见 GitHub Releases，构建失败的目标不会成为公开发布。
+
+```sh
+mise run core-release -- check mesen
+mise run core-release -- check bsnes
+mise run core-release -- check ppsspp
+gh workflow run release.yml --repo continue-arcade/cores -f core=ppsspp
+gh workflow run all-releases.yml --repo continue-arcade/cores
+```
+
+每个 Core 各自维护 tag 前缀、来源账本和 Cart 版本，不以多个 Core 共用一次版本号。其他来源的 tag 不进入当前 Core 账本。
+PPSSPP 的 `assets/*` 对应 `cores/ppsspp/system/PPSSPP/*`，资源 manifest 声明相对 system 目录。
+宿主启动此 Core 时需将该目录映射到 Libretro system directory；分发和安装完成不等于宿主运行器已实现该映射。
+运行资源逐文件计算摘要，缺少 compat.ini、flash0/font、ppge_atlas.zim/meta 时拒绝打包。
+FFmpeg 等静态库采用上游固定子模块内提供的版本，编入包的第三方 notices 和对应递归源码随发布保留；不声称所有依赖由本轮 CI 重新编译。
+NES 的 FDS、SNES 的 Super Game Boy 等内容另需用户自己的合法固件，本仓不打包外部固件或游戏。
+
+上游选择、许可证及各平台构建依据见 [来源研究](docs/additional-core-sources-20261030.md)。Snes9x 因非商业许可约束未进入本轮默认分发。

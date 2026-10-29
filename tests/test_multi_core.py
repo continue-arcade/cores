@@ -50,3 +50,48 @@ class MultiCoreTests(unittest.TestCase):
         self.assertIn('flash0/font', core.REGISTRY['required_runtime_assets'])
         self.assertIn('compat.ini', core.REGISTRY['required_runtime_assets'])
         self.assertIn('ppge_atlas.zim', core.REGISTRY['required_runtime_assets'])
+
+class RuntimePackageTests(unittest.TestCase):
+    def tearDown(self):
+        core.select_core('mgba')
+
+    def test_ppsspp_package_binds_runtime_bytes_and_rejects_tampering(self):
+        import struct,zipfile,hashlib
+        core.select_core('ppsspp')
+        lock=core.make_lock('v1.20.4',core.REGISTRY['bootstrap']['sha'],'0.1.0-smoke.1','a'*40)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            binary=root/'core.dylib'; binary.write_bytes(struct.pack('<IIII',0xfeedfacf,0x0100000c,0,6)+b'\0'*48)
+            license_file=root/'LICENSE';license_file.write_text('GNU GENERAL PUBLIC LICENSE')
+            assets={'cores/ppsspp/system/PPSSPP/'+p:b'fixed '+p.encode() for p in ['compat.ini','flash0/font/font.pgf','ppge_atlas.zim','ppge_atlas.meta']}
+            with self.assertRaisesRegex(core.ReleaseError,'运行资源'):
+                core.package(lock,'macos-aarch64',binary,license_file,{},root/'missing')
+            report=core.package(lock,'macos-aarch64',binary,license_file,{},root/'out',assets)
+            path=root/'out'/report['file']
+            with zipfile.ZipFile(path) as archive:
+                files={name:archive.read(name) for name in archive.namelist()}
+                resource=core.tomllib.loads(files['cores/ppsspp/continue.toml'].decode())
+                self.assertEqual(resource['core']['system_directory'],'system')
+                self.assertEqual(files['cores/ppsspp/system/PPSSPP/compat.ini'],b'fixed compat.ini')
+            files['cores/ppsspp/system/PPSSPP/compat.ini']=b'tampered runtime data'
+            with zipfile.ZipFile(path,'w') as archive:
+                for name,data in files.items(): archive.writestr(name,data)
+            report['sha256']=hashlib.sha256(path.read_bytes()).hexdigest();report['size_bytes']=path.stat().st_size
+            with self.assertRaisesRegex(core.ReleaseError,'运行资源摘要'):
+                core.verify_package(path,report,lock)
+
+    def test_corresponding_source_archive_contains_fixed_submodules(self):
+        import subprocess,tarfile
+        core.select_core('ppsspp')
+        def git(root,*args):
+            return subprocess.check_output(['git','-C',str(root),'-c','user.name=Test','-c','user.email=test@example.com',*args],text=True).strip()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); source=root/'source';child=root/'child'
+            for path in [source,child]:
+                path.mkdir();git(path,'init','-q');(path/'README.txt').write_text(path.name+'\n');git(path,'add','.');git(path,'commit','-qm','fixture')
+            git(source,'-c','protocol.file.allow=always','submodule','add',str(child),'ext/fixed')
+            git(source,'commit','-qam','pin submodule')
+            archive=root/'source.tar.gz';core.archive_source(source,archive)
+            with tarfile.open(archive) as packed:
+                self.assertEqual(packed.extractfile('ppsspp/ext/fixed/README.txt').read(),b'child\n')
+                self.assertEqual(packed.pax_headers['comment'],git(source,'rev-parse','HEAD'))
