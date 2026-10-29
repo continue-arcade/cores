@@ -37,10 +37,13 @@ def build_native(core, registry, lock, target, source, build_dir, run):
     elif core == 'bsnes':
         platform_name=target.split('-')[0]
         if target.startswith('windows'):
-            compiler=str(Path('C:/msys64/mingw64/bin/g++.exe'))
+            mingw=Path('C:/msys64/mingw64/bin')
+            os.environ['PATH']=str(mingw)+os.pathsep+os.environ['PATH']
+            compiler=str(mingw/'g++.exe')
             logs['compiler']=run([compiler,'--version'])
+            compiler += ' -include stdexcept'
         else:
-            compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')
+            compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')+' -include stdexcept'
         logs['build_log']=run(['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler])
         search=source/'bsnes/out'
     elif core == 'ppsspp':
