@@ -24,9 +24,9 @@
 GitHub macOS runner 标签按当前官方文档使用 `macos-15`（arm64），脚本仍检查真实本机架构并显式设置 CMake arm64。
 Windows 通过 Visual Studio Developer Shell 取得原生编译与 dumpbin 工具，仅将工具路径/SDK 字段写入 job 环境，不导出整个环境。
 
-## 尚待执行
+## 原生验证范围
 
-独立 review 后才能触发真实三平台 Release workflow。此时不声称 Windows/Linux 构建通过，也不声称 GitHub Release 已公开。
+独立 review 与三平台流水线现已完成，真实发布结果见文末。
 本机成功只证明架构、动态依赖、ABI 入口和包结构；没有进行真实 ROM、图像、音频、输入、性能或设备验证。
 
 ## GitHub 三平台首轮差异
@@ -40,3 +40,24 @@ Windows 通过 Visual Studio Developer Shell 取得原生编译与 dumpbin 工�
 下载三个实际归档比较：3017 个成员和 commit pax 一致，Windows 有 1517 个文本因全局 core.autocrlf=true 变为 CRLF（连 git archive 也受影响）。
 将上游 checkout 的仓库级 autocrlf=false/eol=lf 固定，归档命令额外显式覆盖这两个配置，确保采用 Git blob 原始换行；不修改上游任何源码。
 增加真实 Git 仓库回归测试：本地 autocrlf=true 时，生成归档必须仍为最初提交的 LF 字节。该测试先失败再实现，19 项通过。
+
+## 最终真实发布结果
+
+- 成功工作流：https://github.com/continue-arcade/cores/actions/runs/40929193047
+- 不可变试发布：https://github.com/continue-arcade/cores/releases/tag/mgba/v0.1.0-smoke.1
+- 配方 commit：`7f119ec`，正式 Core 0.10.5，完整 SHA `26b7884bc25a5933960f3cdcd98bac1ae14d42e2`。
+- Release API：draft=false、prerelease=true、immutable=true，10 个资产。Draft 收齐才公开，没有覆盖任何已发布包。
+- 三平台 build、原生 ABI、依赖、Cart 验包与来源归档对账全部成功。源码归档统一 SHA-256 `8159bdab2bc318ece0cfec5a8c7e26ce76e0ea97eeac3b66084e62670582384d`，14344744 字节。
+- 发布后 `check mgba` 成功返回 `update:false`、`candidate:null`。
+
+| 目标 | Cart 字节数 | SHA-256 |
+| --- | ---: | --- |
+| macos-aarch64 | 435254 | `1254ddc40299d260c753d6bdb68f265220eb653f646a9f3a6da1e3171b6d451a` |
+| windows-x86_64 | 523433 | `75a09fd3828e06d03fa9323d4d3d6363e2128362dc376c18dad926b85f0c410f` |
+| linux-x86_64 | 584165 | `5692fd03cfed91d8364ba514f1f71c93f141b9a8c294cb66bd7a166357154b01` |
+
+Linux 实际最高符号需求 **GLIBC_2.38**，要求 **glibc >= 2.38**，只依赖 libm、libc 和系统 loader。不声称通用 Linux 或更老 glibc 兼容。
+Windows 静态 CRT，dumpbin 唯一动态依赖 **KERNEL32.dll**，无 VCRUNTIME/MSVCP 依赖。
+macOS arm64 仅依赖 **Foundation.framework** 与 **libSystem.B.dylib**；部署目标 11.0，没有在旧版 macOS 真机验收。
+
+上述只是源码/原生 ABI/包装/分发证据。实际 ROM、图像、音频、输入、性能和设备兼容仍未验证；矩阵保持三个既定目标。

@@ -52,7 +52,9 @@ GitHub 托管 runner 镜像与系统编译器可能更新，不承诺二进制�
 
 各原生 runner 检查架构，加载动态库，解析全部标准 libretro 入口并查询 API/库版本。
 这属于原生 ABI 冒烟，**尚不证明实际 ROM、图像、音频、输入、性能或设备兼容**。
-Linux 记录实际符号版本需求；Ubuntu 24.04 构建不代表支持所有更老发行版。
+首轮 Linux/x86_64 的实测最高符号需求为 **GLIBC_2.38**，要求 **glibc >= 2.38**，不代表兼容所有 Linux 发行版。
+Windows/x86_64 使用静态 CRT，dumpbin 实测仅依赖 **KERNEL32.dll**，无 VCRUNTIME/MSVCP 运行库依赖。
+macOS/aarch64 实测仅依赖 **Foundation.framework** 和 **libSystem.B.dylib**；部署目标 11.0 不代替旧系统真实运行验证。
 
 ## Actions 与不可变发布
 
@@ -71,3 +73,9 @@ gh api repos/continue-arcade/cores/immutable-releases
 一个目标失败就不会执行发布 job；后补平台必须提升 Cart 版本。
 GitHub immutable 功能锁定公开 tag 和资产，脚本还检查发布响应的 immutable 状态。
 本地使用已登录 `gh` 的凭据通过 `GH_TOKEN` 环境变量传入；凭据不得写入配置、源码或日志。
+
+## 首轮已发布
+
+[试发布 Cart 0.1.0-smoke.1](https://github.com/continue-arcade/cores/releases/tag/mgba/v0.1.0-smoke.1) 已公开，prerelease=true、immutable=true，共 10 个资产。
+[三平台成功工作流](https://github.com/continue-arcade/cores/actions/runs/40929193047)，构建配方 commit `7f119ec`。
+发布后本地检测返回 `update:false`；完整实际构建差异与验证范围见 [验证记录](docs/verification-20261030.md)。
