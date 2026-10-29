@@ -63,8 +63,9 @@ def core_name():
     return REGISTRY.get('name', 'mGBA')
 
 
-def activate_lock(lock):
+def activate_lock(lock, expected_core=None):
     name = lock['cart_id'].removeprefix('org.continue.core.')
+    require(expected_core is None or name == expected_core, '请求 Core 与输入锁不符')
     select_core(name)
 
 
@@ -471,7 +472,7 @@ def native_dependencies(binary, target):
         return listing
     listing = run(['dumpbin', '/dependents', binary])
     dlls = re.findall(r'^\s+([\w.-]+\.dll)\s*$', listing, re.M | re.I)
-    require(all(re.fullmatch(r'(kernel32|user32|advapi32|shell32|ole32|oleaut32|ws2_32|shlwapi|winmm|comdlg32|gdi32|opengl32|d3dcompiler_47|d3d11|dxgi|dinput8|xinput1_4|hid|version|setupapi|dwmapi|imm32|bcrypt|ntdll|msvcrt|ucrtbase|api-ms-win-[\w-]+)\.dll', d, re.I) for d in dlls), 'Windows 非系统动态依赖: ' + listing)
+    require(all(re.fullmatch(r'(kernel32|user32|advapi32|shell32|ole32|oleaut32|ws2_32|shlwapi|winmm|iphlpapi|comdlg32|gdi32|opengl32|d3dcompiler_47|d3d11|dxgi|dinput8|xinput1_4|hid|version|setupapi|dwmapi|imm32|bcrypt|ntdll|msvcrt|ucrtbase|api-ms-win-[\w-]+)\.dll', d, re.I) for d in dlls), 'Windows 非系统动态依赖: ' + listing)
     return listing
 
 def archive_source(source, output):
@@ -540,7 +541,7 @@ def build(lock_path,target,output):
     evidence['source_archive']={'file':archive.name,'sha256':sha256(archive),'size_bytes':archive.stat().st_size}
     notice_paths=REGISTRY.get('license_files',['LICENSE','src/third-party/inih/LICENSE.txt','src/third-party/blip_buf/license.txt'])
     license_files=[source/name for name in notice_paths]
-    if REGISTRY.get('submodules'):
+    if CORE != 'mgba':
         license_files += [p for p in source.rglob('*') if p.is_file() and not p.is_symlink() and '.git' not in p.parts and re.match(r'^(licen[sc]e|copying|notice|copyright)',p.name,re.I)]
     license_files=sorted(set(license_files))
     license_bundle=work/'LICENSE'
@@ -550,6 +551,7 @@ def build(lock_path,target,output):
         assets=source/REGISTRY['runtime_assets']['source']
         for required in REGISTRY['required_runtime_assets']: require((assets/required).exists(),'缺少必需运行资源: '+required)
         for path in sorted(assets.rglob('*')):
+            if '.git' in path.relative_to(assets).parts or path.name == '.gitignore': continue
             require(not path.is_symlink(),'运行资源不接受符号链接')
             if path.is_file(): runtime[f'cores/{CORE}/'+REGISTRY['runtime_assets']['destination']+'/'+path.relative_to(assets).as_posix()]=path.read_bytes()
     return package(lock,target,binary,license_bundle,evidence,output,runtime)
@@ -617,16 +619,18 @@ def main():
     builder.add_argument('input_lock')
     builder.add_argument('target', choices=TARGETS)
     builder.add_argument('--output', default='dist')
+    builder.add_argument('--core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
     for command in ('verify', 'publish'):
         p = sub.add_parser(command)
         p.add_argument('directory')
+        p.add_argument('--core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
     args = parser.parse_args()
     try:
         if args.command in ('check','prepare'):
             select_core(args.core)
         else:
             path=Path(args.input_lock) if args.command=='build' else Path(args.directory)/'input-lock.json'
-            activate_lock(json.loads(path.read_text()))
+            activate_lock(json.loads(path.read_text()),args.core)
         if args.command == 'check':
             adopted = published_sources()
             candidate = select_candidate(pages(f'repos/{REGISTRY["upstream_repo"]}/releases'), adopted, resolve_tag)

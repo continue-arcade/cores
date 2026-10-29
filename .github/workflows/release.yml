@@ -41,7 +41,7 @@ jobs:
       - if: steps.check.outputs.update == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: input-lock
+          name: input-lock-${{ inputs.core }}
           path: input-lock.json
           if-no-files-found: error
   build:
@@ -63,7 +63,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: input-lock
+          name: input-lock-${{ inputs.core }}
       - name: Linux toolchain
         if: runner.os == 'Linux'
         run: |
@@ -91,11 +91,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CORE_TARGET: ${{ matrix.target }}
+          CORE: ${{ inputs.core }}
         shell: bash
-        run: mise run core-release -- build input-lock.json "$CORE_TARGET" --output dist
+        run: mise run core-release -- build input-lock.json "$CORE_TARGET" --core "$CORE" --output dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: core-${{ matrix.target }}
+          name: core-${{ inputs.core }}-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
@@ -110,10 +111,13 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          pattern: core-*
+          pattern: core-${{ inputs.core }}-*
           path: dist
           merge-multiple: true
-      - run: mise run core-release -- verify dist
+      - env:
+          CORE: ${{ inputs.core }}
+        run: mise run core-release -- verify dist --core "$CORE"
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: mise run core-release -- publish dist
+          CORE: ${{ inputs.core }}
+        run: mise run core-release -- publish dist --core "$CORE"

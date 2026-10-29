@@ -38,6 +38,7 @@ def build_native(core, registry, lock, target, source, build_dir, run):
         platform_name=target.split('-')[0]
         if target.startswith('windows'):
             compiler=str(Path('C:/msys64/mingw64/bin/g++.exe'))
+            logs['compiler']=run([compiler,'--version'])
         else:
             compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')
         logs['build_log']=run(['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler])

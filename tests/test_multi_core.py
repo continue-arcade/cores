@@ -95,3 +95,13 @@ class RuntimePackageTests(unittest.TestCase):
             with tarfile.open(archive) as packed:
                 self.assertEqual(packed.extractfile('ppsspp/ext/fixed/README.txt').read(),b'child\n')
                 self.assertEqual(packed.pax_headers['comment'],git(source,'rev-parse','HEAD'))
+
+class WorkflowIdentityTests(unittest.TestCase):
+    def tearDown(self):
+        core.select_core('mgba')
+
+    def test_requested_core_must_match_downloaded_input_lock(self):
+        core.select_core('ppsspp')
+        lock=core.make_lock('v1.20.4',core.REGISTRY['bootstrap']['sha'],'0.1.0-smoke.1','a'*40)
+        with self.assertRaisesRegex(core.ReleaseError,'Core.*不符'):
+            core.activate_lock(lock,'mesen')
