@@ -30,5 +30,8 @@
     "Libretro/Makefile",
     "Libretro/libretro.cpp"
   ],
-  "abi_name": "Mesen"
+  "abi_name": "Mesen",
+  "supply_policy": "auto",
+  "allow_prebuilt_snapshots": true,
+  "prebuilt_source_url": "https://github.com/libretro/Mesen"
 }

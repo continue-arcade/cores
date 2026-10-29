@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""正式上游 Release → 固定 SHA → 原生 libretro → 不可覆盖的 Cart Release。"""
+"""正式版本触发 → 固定预编译输入或源码 → 原生验证 → 不可覆盖的 Cart Release。"""
 import argparse
 import ctypes
 import hashlib
@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 import urllib.error
 import urllib.parse
@@ -23,13 +24,15 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'scripts'))
+import prebuilt
 CORE = 'mgba'
 REGISTRY = json.loads((ROOT / 'registry/mgba.json').read_text())
 TARGETS = REGISTRY['targets']
 CART_ID = 'org.continue.core.mgba'
 RESOURCE_ID = 'org.continue.resource.core.mgba'
 STABLE = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')
-RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', 'registry/mgba.json', 'mise.toml', '.github/workflows/release.yml')
+RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', 'scripts/prebuilt.py', 'registry/mgba.json', 'mise.toml', '.github/workflows/release.yml')
 SEMVER = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$')
 
 class ReleaseError(Exception):
@@ -50,7 +53,7 @@ def select_core(name):
     CART_ID = 'org.continue.core.' + name
     RESOURCE_ID = 'org.continue.resource.core.' + name
     STABLE = re.compile(REGISTRY.get('tag_pattern', r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'))
-    RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', f'registry/{name}.json', 'mise.toml', '.github/workflows/release.yml')
+    RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', 'scripts/prebuilt.py', f'registry/{name}.json', 'mise.toml', '.github/workflows/release.yml')
 
 
 def source_version(tag):
@@ -204,7 +207,7 @@ def ensure_recipe_reference(lock, remote=api):
     return reference
 
 
-def make_lock(tag, sha, cart_version, recipe_commit):
+def make_lock(tag, sha, cart_version, recipe_commit, supply=None):
     lock = {'schema': 'continue.core-release.v1', 'cart_id': CART_ID,
             'resource_id': RESOURCE_ID, 'cart_version': cart_version,
             'release_tag': CORE + '/v' + cart_version,
@@ -212,7 +215,7 @@ def make_lock(tag, sha, cart_version, recipe_commit):
             'recipe': {'revision': REGISTRY['recipe_revision'], 'commit': recipe_commit,
                        'cmake_options': REGISTRY['cmake_options'],
                        'files':{name:sha256(ROOT/name) for name in RECIPE_FILES}},
-            'targets': TARGETS}
+            'targets': TARGETS, 'supply_policy':supply or REGISTRY.get('supply_policy','source')}
     validate_lock(lock)
     return lock
 
@@ -226,24 +229,89 @@ def validate_lock(lock):
     require(SEMVER.fullmatch(lock['cart_version']), 'Cart 版本必须是 SemVer')
     require(lock['release_tag'] == CORE + '/v' + lock['cart_version'], '发布 tag 不符')
     require(lock['targets'] == TARGETS, '目标集合不符')
+    require(lock.get('supply_policy','source') in ('auto','source','prebuilt'),'供应方式无效')
     require(lock['recipe']['cmake_options'] == REGISTRY['cmake_options']
             and lock['recipe']['revision'] == REGISTRY['recipe_revision']
             and re.fullmatch('[0-9a-f]{40}', lock['recipe']['commit'])
             and set(lock['recipe']['files']) == set(RECIPE_FILES)
             and all(re.fullmatch('[0-9a-f]{64}', h) for h in lock['recipe']['files'].values()), '构建配方不符')
 
-def prepare(tag, cart_version, output):
+def prepare(tag, cart_version, output, supply=None):
     release = api(f'repos/{REGISTRY["upstream_repo"]}/releases/tags/{tag}')
     require(not release['draft'] and not release['prerelease'] and STABLE.fullmatch(tag), '只接受上游正式 Release')
     commit = run(['git', 'rev-parse', 'HEAD'], ROOT)
     require(not run(['git', 'status', '--porcelain', '--untracked-files=no'], ROOT), '准备发布前必须提交配方改动')
-    lock = make_lock(tag, resolve_tag(tag), cart_version, commit)
+    lock = make_lock(tag, resolve_tag(tag), cart_version, commit, supply)
     require_recipe_checkout(lock)
     prior = published_sources()
     require(not prior or cart_version_key(cart_version) > max(cart_version_key(p['cart_version']) for p in prior), '新 Cart 版本必须大于所有已发布版本')
     ensure_recipe_reference(lock)
+    if lock['supply_policy']!='source':
+        freeze_prebuilt(lock)
     write_json(output, lock)
     return lock
+
+def prebuilt_location(target):
+    prefix={'macos-aarch64':'apple/osx/arm64','windows-x86_64':'windows/x86_64','linux-x86_64':'linux/x86_64'}[target]
+    member=CORE+'_libretro.'+extension(target)
+    return 'https://buildbot.libretro.com/nightly/'+prefix+'/latest/'+member+'.zip',member
+
+
+def freeze_prebuilt(lock):
+    descriptions={}
+    for target in TARGETS:
+        url,member=prebuilt_location(target)
+        try: descriptions[target]=prebuilt.describe(url,member)
+        except urllib.error.HTTPError as error:
+            if error.code!=404: raise
+            if lock['supply_policy']=='prebuilt': raise ReleaseError('该目标没有上游预编译包: '+target)
+            descriptions[target]={'unavailable':'HTTP 404'}
+    if REGISTRY.get('runtime_assets'):
+        lock['prebuilt_assets']=prebuilt.file_description('https://buildbot.libretro.com/assets/system/PPSSPP.zip')
+    lock['prebuilt']=descriptions
+
+
+def build_prebuilt(lock,target,output):
+    description=lock.get('prebuilt',{}).get(target)
+    if not description or description.get('unavailable'):
+        require(lock.get('supply_policy')!='prebuilt','强制预编译模式缺少该目标输入')
+        return None
+    url,member=prebuilt_location(target)
+    require(description['url']==url and description['member']==member,'预编译来源与登记不符')
+    work=ROOT/'work'/'prebuilt'/CORE/target
+    require(not work.exists(),'预编译工作目录已存在')
+    work.mkdir(parents=True)
+    binary=work/(CORE+'.'+extension(target));binary.write_bytes(prebuilt.retrieve(description))
+    require(binary_target(binary.read_bytes())==target,'预编译目标架构不符')
+    dependencies=native_dependencies(binary,target);abi=abi_probe(binary)
+    require(abi['library_name'].lower()==REGISTRY.get('abi_name','mGBA').lower(),'预编译 Core 名称不符')
+    require(REGISTRY.get('allow_prebuilt_snapshots',False),'当前登记未允许预编译快照')
+    version=prebuilt.resource_version(abi['library_version'])
+    baseline=tuple(map(int,lock['source']['version'].split('.')))
+    observed=tuple(map(int,prebuilt.base_version(abi['library_version']).split('.')))
+    require(observed>=baseline,'预编译版本低于已选择基线')
+    source=lock['source'];hosts={'raw.githubusercontent.com'}
+    paths=REGISTRY.get('license_files',['LICENSE','src/third-party/inih/LICENSE.txt','src/third-party/blip_buf/license.txt'])
+    license_file=work/'LICENSE'
+    notices=[]
+    for name in paths:
+        location=f'https://raw.githubusercontent.com/{source["repo"]}/{source["sha"]}/{name}'
+        notices.append(('=== upstream reference '+name+' ===\n').encode()+prebuilt.fetch(location,hosts,1024*1024))
+    license_file.write_bytes(b'\n\n'.join(notices))
+    runtime={};assets_origin=None
+    if REGISTRY.get('runtime_assets'):
+        assets_origin=lock.get('prebuilt_assets');require(assets_origin,'缺少预编译运行资源输入锁')
+        require(assets_origin['url']=='https://buildbot.libretro.com/assets/system/PPSSPP.zip','资源来源与登记不符')
+        runtime=prebuilt.runtime_assets(prebuilt.retrieve_file(assets_origin),f'cores/{CORE}/system/PPSSPP')
+    origin={k:v for k,v in description.items() if k!='payload'}
+    origin.update({'kind':'libretro-buildbot-snapshot','version':abi['library_version'],
+                   'revision':prebuilt.revision(abi['library_version']),
+                   'upstream_source_url':REGISTRY.get('prebuilt_source_url','https://github.com/'+source['repo'])})
+    evidence={'supply_kind':'prebuilt','binary_origin':origin,'resource_version':version,'abi':abi,
+              'dependencies':dependencies,'assets_origin':assets_origin,
+              'compiler':'上游预编译；本轮不编译二进制','cmake_cache':'','source_archive':None}
+    return package(lock,target,binary,license_file,evidence,output,runtime)
+
 
 def native_target():
     machine = platform.machine().lower()
@@ -279,13 +347,15 @@ def package(lock, target, binary, license_path, evidence, output, runtime_files=
     author = REGISTRY.get('author', 'mGBA Contributors')
     license_id = REGISTRY.get('license', 'MPL-2.0')
     platforms = REGISTRY.get('platforms', ['gba','gbc','gb'])
+    description=('由 Continue 封装的上游预编译快照 Libretro Core。'
+                 if evidence.get('binary_origin') else '由 Continue 从正式源码构建的 Libretro Core。')
     manifest = f'''schema = "continue.cartfile.v1"
 id = "{CART_ID}"
 name = "{core_name()} Core"
 version = "{lock['cart_version']}"
 author = "{author}"
 publisher = "Continue"
-description = "由 Continue 从正式源码构建的 Libretro Core。"
+description = "{description}"
 [artifact]
 format = "cart.zip.v1"
 [artifact.target]
@@ -298,10 +368,10 @@ paths = ["cores/", "LICENSE", "SOURCE.md", "build-report.json"]
 type = "core"
 id = "{RESOURCE_ID}"
 name = "{core_name()}"
-version = "{lock['source']['version']}"
+version = "{evidence.get('resource_version',lock['source']['version'])}"
 author = "{author}"
 license = "{license_id}"
-description = "正式版 Core，Continue 源码构建。"
+description = "{description}"
 [entrypoints]
 {system}_{arch} = "{entry}"
 [[targets]]
@@ -334,6 +404,24 @@ Core 与 Cart 发布版本分别记录；原生 ABI 检查不代表 ROM、画面
 '''
     if runtime_files:
         source_text += '\nPPSSPP 运行时必须将本资源的 system/PPSSPP 目录映射到 Libretro system/PPSSPP。随包资源来自同一正式源码，不包含用户游戏、存档或外部固件。\n'
+    if evidence.get('binary_origin'):
+        origin=evidence['binary_origin']
+        source_text=f'''# {core_name()} 预编译快照来源
+
+供应方：Libretro Buildbot
+固定下载入口：{origin['url']}
+下载包 SHA-256：{origin['archive_sha256']}
+二进制 SHA-256：{origin['payload_sha256']}
+二进制自报版本：{origin['version']}
+源码 revision 提示：{origin.get('revision') or '未报告，不从日期或CRC猜测'}
+上游源码入口：{origin['upstream_source_url']}
+
+此包是经过目标、Libretro API、版本、依赖和摘要验证的上游预编译快照。
+下列正式版本仅为更新触发/源码兜底及许可参考，不声称下载二进制恰由此 commit 编译：
+https://github.com/{source['repo']}/tree/{source['sha']} （{source['tag']}）
+包内许可见 LICENSE；未知编译器与源码 revision 如实保留未知。
+'''
+        if runtime_files: source_text+='\n运行资源来自另行固定摘要的官方 PPSSPP.zip，目录为 system/PPSSPP。\n'
     build_report = {'lock': lock, 'target': target, 'binary_sha256': digest(data),
                     'binary_size_bytes': len(data), 'evidence': evidence}
     files = {'cartfile.toml':manifest.encode(), prefix+'continue.toml':resource.encode(), prefix+entry:data,
@@ -370,7 +458,7 @@ def verify_package(path, report, lock):
         resource=tomllib.loads(archive.read(prefix+'continue.toml').decode())
         require(manifest['schema']=='continue.cartfile.v1' and manifest['id']==CART_ID and manifest['version']==lock['cart_version'],'Cart 身份不符')
         require(manifest['artifact']=={'format':'cart.zip.v1','target':{'os':system,'arch':arch}},'Cart 目标不符')
-        require(resource['schema']=='continue.resource.v1' and resource['type']=='core' and resource['id']==RESOURCE_ID and resource['version']==lock['source']['version'],'资源身份不符')
+        require(resource['schema']=='continue.resource.v1' and resource['type']=='core' and resource['id']==RESOURCE_ID and resource['version']==report['evidence'].get('resource_version',lock['source']['version']),'资源身份不符')
         entry=f'targets/{target}/{CORE}.{extension(target)}'
         require(resource['entrypoints']=={f'{system}_{arch}':entry} and resource['targets']==[{'os':system,'arch':arch}],'资源目标或入口不符')
         data=archive.read(prefix+entry)
@@ -380,6 +468,10 @@ def verify_package(path, report, lock):
         require(inner=={k:report[k] for k in ('lock','target','binary_sha256','binary_size_bytes','evidence')},'内外构建报告不一致')
         marker=REGISTRY.get('license_marker','Mozilla Public License').encode()
         require(lock['source']['sha'] in archive.read('SOURCE.md').decode() and marker in archive.read('LICENSE'),'来源或许可缺失')
+        if report['evidence'].get('binary_origin'):
+            origin=report['evidence']['binary_origin'];abi=report['evidence']['abi']
+            require(origin['version']==abi['library_version'] and origin['payload_sha256']==report['binary_sha256'],'预编译来源与二进制报告不符')
+            require(resource['version']==prebuilt.resource_version(abi['library_version']),'预编译资源版本未标记快照')
         runtime=report['evidence'].get('runtime_files',{})
         for name,expected in runtime.items():
             require(name.startswith(prefix) and digest(archive.read(name))==expected,'运行资源摘要不符')
@@ -429,15 +521,24 @@ def verify_release(directory):
     for report in reports:
         verify_package(directory / report['file'], report, lock)
     require({p.name for p in directory.glob('*.cart')} == {r['file'] for r in reports}, '存在未登记 Cart')
+    source_reports=[report for report in reports if report['evidence'].get('supply_kind')!='prebuilt']
     archive = directory / f'{CORE}-source-{lock["source"]["sha"]}.tar.gz'
-    require(archive.is_file(), '发布缺失对应源码归档')
+    source_archive=None
+    if source_reports:
+        require(archive.is_file(), '发布缺失对应源码归档')
+        source_archive=verify_source_archive(archive,lock,source_reports)
+    elif archive.exists():
+        raise ReleaseError('纯预编译发布目录含未登记源码归档')
+    if any(r['evidence'].get('binary_origin') for r in reports):
+        versions={prebuilt.base_version(r['evidence']['abi']['library_version']) for r in reports}
+        require(len(versions)==1,'各平台 Core 基础版本不同；保留候选，选择匹配包或使用源码模式')
     summary = {'schema': 'continue.core-release-report.v1', 'lock': lock, 'artifacts': reports,
-               'source_archive': verify_source_archive(archive, lock, reports)}
+               'source_archive': source_archive}
     existing = directory / 'release-report.json'
     if existing.exists():
         require(json.loads(existing.read_text()) == summary, '已有全发布报告与当前输入不符')
     write_json(existing, summary)
-    names = sorted([r['file'] for r in reports] + [archive.name, 'input-lock.json', 'release-report.json']
+    names = sorted([r['file'] for r in reports] + ([archive.name] if source_archive else []) + ['input-lock.json', 'release-report.json']
                    + [p.name for p in directory.glob('*.report.json')])
     checksum = ''.join(f'{sha256(directory / name)}  {name}\n' for name in names)
     (directory / 'SHA256SUMS').write_text(checksum, encoding='utf-8')
@@ -521,6 +622,18 @@ def build(lock_path,target,output):
     require(native_target()==target,f'必须在对应原生目标构建: 本机 {native_target()}, 请求 {target}')
     require_recipe_checkout(lock)
     require(resolve_tag(lock['source']['tag'])==lock['source']['sha'],'准备后来源 tag 移动')
+    fallback_reason=None
+    if lock.get('supply_policy','source')!='source':
+        try:
+            result=build_prebuilt(lock,target,output)
+            if result is not None: return result
+            fallback_reason='该目标没有可用的预编译输入'
+        except prebuilt.PinnedArchiveChanged:
+            raise
+        except (ValueError,ReleaseError) as error:
+            if lock['supply_policy']=='prebuilt': raise
+            fallback_reason=type(error).__name__+': '+str(error).split('\n')[0][:180]
+            print(f'[core-release] {CORE}/{target}: prebuilt unavailable or incompatible, source fallback',file=sys.stderr,flush=True)
     work=ROOT/'work'/CORE/target
     require(not work.exists(),'构建目录已存在；请使用新的工作目录或显式清理本 Core work')
     work.mkdir(parents=True); source=work/'source'
@@ -551,7 +664,7 @@ def build(lock_path,target,output):
     evidence={'platform':platform.platform(),'machine':platform.machine(),'runner_image':os.environ.get('ImageVersion','local'),
               'python':sys.version,'cmake':run(['cmake','--version']),'dependencies':dependencies,'abi':abi,
               'compiler':logs.get('compiler',''),'cmake_cache':logs.get('cmake_cache',''),'build_log':logs['build_log'],
-              'configure_log':logs.get('configure_log',''),'submodules':submodules}
+              'configure_log':logs.get('configure_log',''),'submodules':submodules,'supply_kind':'source','prebuilt_fallback_reason':fallback_reason}
     if target.startswith('macos'):
         evidence['sdk']=run(['xcrun','--show-sdk-version']);evidence['binary_load_commands']=run(['otool','-l',binary])
     if target.startswith('linux'): evidence['symbol_versions']=run(['readelf','--version-info',binary])
@@ -608,7 +721,8 @@ def publish(directory):
     require(resolve_tag(lock['source']['tag']) == lock['source']['sha'], '发布前来源 tag 移动')
     files = sorted(p for p in directory.iterdir() if p.is_file())
     expected_names = {a['file'] for a in summary['artifacts']} | {a['target']+'.report.json' for a in summary['artifacts']}
-    expected_names |= {'input-lock.json', 'release-report.json', 'SHA256SUMS', summary['source_archive']['file']}
+    expected_names |= {'input-lock.json', 'release-report.json', 'SHA256SUMS'}
+    if summary['source_archive']: expected_names.add(summary['source_archive']['file'])
     require({p.name for p in files} == expected_names, '发布目录有未登记文件')
     expected = {p.name: sha256(p) for p in files}
     adopted = published_sources()
@@ -619,11 +733,12 @@ def publish(directory):
         # 拒绝复用游离 tag，防止发布指向错误配方。
         prior_tag = api(f'repos/{repo}/git/ref/tags/{urllib.parse.quote(tag, safe="")}', missing_ok=True)
         require(prior_tag is None, '发布 tag 已存在但没有可恢复 Draft')
-        notes = (f'{core_name()} {lock["source"]["version"]}（正式源码 {lock["source"]["sha"]}）\n\n'
+        supplies='\n'.join(f'- {a["target"]}: {a["evidence"].get("supply_kind","source")} / {a["evidence"].get("resource_version",lock["source"]["version"])}' for a in summary['artifacts'])
+        notes = (f'{core_name()} / 参考版本 {lock["source"]["version"]}（参考源码 {lock["source"]["sha"]}）\n\n'
                  f'Continue Cart {lock["cart_version"]}；原生 ABI 检查通过，未进行 ROM/图像/音频/性能验收。\n'
-                 '三个目标、源码与全部校验材料先收齐，再公开。详见 release-report.json 与 SOURCE.md。')
+                 f'{supplies}\n\n三个目标和全部校验材料先收齐，再公开；源码归档仅覆盖本轮源码构建的目标。详见 release-report.json 与各包 SOURCE.md。')
         existing = api(f'repos/{repo}/releases', 'POST', {'tag_name':tag, 'target_commitish':lock['recipe']['commit'],
-                      'name':f'{core_name()} {lock["source"]["version"]} / Cart {lock["cart_version"]}',
+                      'name':f'{core_name()} / Cart {lock["cart_version"]}',
                       'body':notes, 'draft':True, 'prerelease':'-' in lock['cart_version']})
     for name in missing:
         run(['gh', 'release', 'upload', tag, directory/name, '--repo', repo])
@@ -644,6 +759,7 @@ def main():
     prep.add_argument('core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
     prep.add_argument('version')
     prep.add_argument('--cart-version')
+    prep.add_argument('--supply',choices=['auto','source','prebuilt'])
     prep.add_argument('--output', default='input-lock.json')
     builder = sub.add_parser('build')
     builder.add_argument('input_lock')
@@ -654,14 +770,29 @@ def main():
         p = sub.add_parser(command)
         p.add_argument('directory')
         p.add_argument('--core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
+    probe=sub.add_parser('inspect-prebuilt')
+    probe.add_argument('core',choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
+    probe.add_argument('--previous',type=Path)
+    probe.add_argument('--output',default='prebuilt-observation.json')
     args = parser.parse_args()
     try:
-        if args.command in ('check','prepare'):
+        if args.command in ('check','prepare','inspect-prebuilt'):
             select_core(args.core)
         else:
             path=Path(args.input_lock) if args.command=='build' else Path(args.directory)/'input-lock.json'
             activate_lock(json.loads(path.read_text()),args.core)
-        if args.command == 'check':
+        if args.command == 'inspect-prebuilt':
+            target=native_target();url,member=prebuilt_location(target)
+            description=prebuilt.describe(url,member)
+            with tempfile.TemporaryDirectory(prefix='continue-prebuilt-probe-') as temporary:
+                binary=Path(temporary)/member;binary.write_bytes(prebuilt.retrieve(description))
+                require(binary_target(binary.read_bytes())==target,'预编译架构不符')
+                abi=abi_probe(binary)
+            observation={'version':abi['library_version'],'revision':prebuilt.revision(abi['library_version']),'payload_sha256':description['payload_sha256']}
+            previous=json.loads(args.previous.read_text()).get('identity') if args.previous else None
+            result={'core':CORE,'target':target,'identity':observation,'change':prebuilt.classify(previous,observation),'origin':description,'abi':abi}
+            write_json(args.output,result)
+        elif args.command == 'check':
             adopted = published_sources()
             candidate = select_candidate(pages(f'repos/{REGISTRY["upstream_repo"]}/releases'), adopted, resolve_tag)
             result = {'update': candidate is not None, 'candidate':candidate}
@@ -675,7 +806,7 @@ def main():
                         output.write(f'version={candidate["tag"]}\ncart_version={result["cart_version"]}\n')
         elif args.command == 'prepare':
             cart = args.cart_version or allocate_cart_version(published_sources())
-            result = prepare(args.version, cart, args.output)
+            result = prepare(args.version, cart, args.output,args.supply)
         elif args.command == 'build':
             result = build(args.input_lock, args.target, args.output)
         elif args.command == 'verify':

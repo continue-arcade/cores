@@ -32,5 +32,8 @@
     "bsnes/target-libretro/libretro.cpp",
     "bsnes/GNUmakefile"
   ],
-  "abi_name": "bsnes"
+  "abi_name": "bsnes",
+  "supply_policy": "auto",
+  "allow_prebuilt_snapshots": true,
+  "prebuilt_source_url": "https://github.com/libretro/bsnes"
 }

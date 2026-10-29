@@ -7,11 +7,19 @@ on:
         type: choice
         options: [mgba, mesen, bsnes, ppsspp]
         default: mgba
+      supply:
+        description: 二进制供应方式
+        type: choice
+        options: [auto, prebuilt, source]
+        default: auto
   workflow_call:
     inputs:
       core:
         type: string
         required: true
+      supply:
+        type: string
+        default: auto
 permissions:
   contents: read
 jobs:
@@ -35,9 +43,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CORE: ${{ inputs.core }}
+          SUPPLY: ${{ inputs.supply }}
           CORE_VERSION: ${{ steps.check.outputs.version }}
           CART_VERSION: ${{ steps.check.outputs.cart_version }}
-        run: mise run core-release -- prepare "$CORE" "$CORE_VERSION" --cart-version "$CART_VERSION"
+        run: mise run core-release -- prepare "$CORE" "$CORE_VERSION" --cart-version "$CART_VERSION" --supply "$SUPPLY"
       - if: steps.check.outputs.update == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

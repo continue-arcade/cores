@@ -42,5 +42,8 @@
     "CMAKE_BUILD_TYPE": "Release",
     "CMAKE_SKIP_RPATH": "ON",
     "SKIP_LIBRARY": "ON"
-  }
+  },
+  "supply_policy": "auto",
+  "allow_prebuilt_snapshots": true,
+  "prebuilt_source_url": "https://github.com/libretro/mgba"
 }
