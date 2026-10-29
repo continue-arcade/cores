@@ -28,3 +28,9 @@ Windows 通过 Visual Studio Developer Shell 取得原生编译与 dumpbin 工�
 
 独立 review 后才能触发真实三平台 Release workflow。此时不声称 Windows/Linux 构建通过，也不声称 GitHub Release 已公开。
 本机成功只证明架构、动态依赖、ABI 入口和包结构；没有进行真实 ROM、图像、音频、输入、性能或设备验证。
+
+## GitHub 三平台首轮差异
+
+工作流 https://github.com/continue-arcade/cores/actions/runs/40928260405 的 macOS 与 Linux 构建通过；Windows 在 CMake configure 阶段失败，未创建公开 Release。
+上游 0.10.5 CMakeLists.txt:746 对 Windows 普通 library 路径要求 epoxy，即使 BUILD_SHARED/STATIC 为 OFF 仍触发。
+本仓只构建 mgba_libretro，因此按上游已提供的 SKIP_LIBRARY=ON 跳过普通 library 路径；保持所有原生 ABI、目标和完整性检查。
