@@ -327,11 +327,18 @@ def abi_probe(binary):
             'library_version': info.library_version.decode(), 'valid_extensions': info.valid_extensions.decode(),
             'exported_symbols': symbols}
 
+def validate_macos_dependencies(listing, install_name):
+    dependencies = [line.strip().split(' (')[0] for line in listing.splitlines()[1:]]
+    require(all(d == install_name or d.startswith('/usr/lib/') or d.startswith('/System/Library/')
+                for d in dependencies), 'macOS 非系统动态依赖')
+
+
 def native_dependencies(binary, target):
     if target.startswith('macos'):
         listing = run(['otool', '-L', binary])
-        dependencies = [line.strip().split(' (')[0] for line in listing.splitlines()[1:]]
-        require(all(d.startswith('/usr/lib/') or d.startswith('/System/Library/') for d in dependencies), 'macOS 非系统动态依赖')
+        install_names = run(['otool', '-D', binary]).splitlines()[1:]
+        require(len(install_names) == 1, 'macOS install name 不唯一')
+        validate_macos_dependencies(listing, install_names[0].strip())
         return listing
     if target.startswith('linux'):
         listing = run(['ldd', binary])
@@ -394,7 +401,12 @@ def build(lock_path, target, output):
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
     run(['git', '-C', source, 'archive', '--format=tar.gz', '--prefix=mgba/', '--output', archive.resolve(), 'HEAD'])
-    return package(lock, target, binary, source/'LICENSE', evidence, output)
+    license_bundle = work / 'LICENSE'
+    notice_paths = [source/'LICENSE', source/'src/third-party/inih/LICENSE.txt',
+                    source/'src/third-party/blip_buf/license.txt']
+    license_bundle.write_text('\n\n'.join(f'=== {p.relative_to(source)} ===\n{p.read_text()}' for p in notice_paths)
+                              + '\n\nblip-buf Copyright (C) 2003-2009 Shay Green. LGPL-2.1-or-later.\n', encoding='utf-8')
+    return package(lock, target, binary, license_bundle, evidence, output)
 
 def validate_publication(existing, expected):
     if existing is None:
@@ -481,7 +493,8 @@ def main():
             result = verify_release(args.directory)
         else:
             result = publish(args.directory)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        printable = {k: result[k] for k in ('file', 'sha256', 'size_bytes', 'target', 'binary_sha256')} if args.command == 'build' else result
+        print(json.dumps(printable, indent=2, ensure_ascii=False))
     except (ReleaseError, OSError, KeyError, ValueError, zipfile.BadZipFile) as error:
         print(f'core-release: {error}', file=sys.stderr)
         return 1

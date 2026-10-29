@@ -60,6 +60,19 @@ class ReleasePolicyTests(unittest.TestCase):
         existing['assets'][0]['digest'] = 'sha256:' + '1'*64
         self.assertEqual(core.validate_publication(existing, {'a.cart': '1'*64}), [])
 
+class DependencyTests(unittest.TestCase):
+    def test_macos_install_name_is_not_an_external_dependency(self):
+        listing = 'core:\n\tmgba_libretro.dylib (compatibility version 0.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)'
+        self.assertIsNotNone(core)
+        self.assertTrue(hasattr(core, 'validate_macos_dependencies'), '尚未区分自身 install name')
+        core.validate_macos_dependencies(listing, 'mgba_libretro.dylib')
+
+    def test_macos_homebrew_dependency_is_rejected(self):
+        self.assertIsNotNone(core)
+        self.assertTrue(hasattr(core, 'validate_macos_dependencies'), '尚未区分自身 install name')
+        with self.assertRaisesRegex(core.ReleaseError, '非系统'):
+            core.validate_macos_dependencies('core:\n\t/opt/homebrew/lib/libz.dylib (compatibility version 1.0.0)', 'mgba_libretro.dylib')
+
 class PackageTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(core, '固定发布脚本尚未实现')
