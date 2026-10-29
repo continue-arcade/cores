@@ -30,8 +30,17 @@ def build_native(core, registry, lock, target, source, build_dir, run):
             msbuild=shutil.which('MSBuild.exe') or str(Path(os.environ['VSINSTALLDIR'])/'MSBuild/Current/Bin/MSBuild.exe')
             # Libretro.vcxproj 的依赖在 .sln 中声明；逐项构建三个静态库，保持独立 PCH 目录。
             messages=[]
-            for project in ['Core','Utilities','SevenZip','Libretro']:
-                messages.append(run([msbuild,source/project/(project+'.vcxproj'),'/m:3','/t:Build','/p:Configuration=Libretro','/p:Platform=x64','/p:PlatformToolset=v143',f'/p:SolutionDir={source}{os.sep}',f'/p:OutDir={build_dir}{os.sep}',f'/p:IntDir={build_dir / "obj" / project}{os.sep}']))
+            original_cl=os.environ.get('_CL_')
+            try:
+                for project in ['Core','Utilities','SevenZip','Libretro']:
+                    # 新 MSVC 不再经 condition_variable 传递包含 chrono；仅 C++ Utilities 需要它。
+                    if project=='Utilities': os.environ['_CL_']=((original_cl or '')+' /FIchrono').strip()
+                    elif original_cl is None: os.environ.pop('_CL_',None)
+                    else: os.environ['_CL_']=original_cl
+                    messages.append(run([msbuild,source/project/(project+'.vcxproj'),'/m:3','/t:Build','/p:Configuration=Libretro','/p:Platform=x64','/p:PlatformToolset=v143',f'/p:SolutionDir={source}{os.sep}',f'/p:OutDir={build_dir}{os.sep}',f'/p:IntDir={build_dir / "obj" / project}{os.sep}']))
+            finally:
+                if original_cl is None: os.environ.pop('_CL_',None)
+                else: os.environ['_CL_']=original_cl
             logs['build_log']='\n'.join(messages)
             search=build_dir
         else:
@@ -45,10 +54,11 @@ def build_native(core, registry, lock, target, source, build_dir, run):
             os.environ['PATH']=str(mingw)+os.pathsep+os.environ['PATH']
             compiler=str(mingw/'g++.exe')
             logs['compiler']=run([compiler,'--version'])
-            compiler += ' -include stdexcept'
         else:
-            compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')+' -include stdexcept'
-        logs['build_log']=run(['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler])
+            compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')
+        args=['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler]
+        if not target.startswith('macos'): args += ['compiler.cpp='+compiler+' -include stdexcept']
+        logs['build_log']=run(args)
         search=source/'bsnes/out'
     elif core == 'ppsspp':
         # 官方 MSVC Make 路径：不引入 CMake 对 libcmt 的排除选项。
