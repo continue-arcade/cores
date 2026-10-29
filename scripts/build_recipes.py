@@ -57,7 +57,7 @@ def build_native(core, registry, lock, target, source, build_dir, run):
         else:
             compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')
         args=['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler]
-        if not target.startswith('macos'): args += ['compiler.cpp='+compiler+' -include stdexcept']
+        if not target.startswith('macos'): args += ['compiler.cpp='+compiler+' -x c++ -std=c++17 -include stdexcept']
         logs['build_log']=run(args)
         search=source/'bsnes/out'
     elif core == 'ppsspp':

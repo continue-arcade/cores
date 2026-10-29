@@ -509,6 +509,7 @@ def build(lock_path,target,output):
     work=ROOT/'work'/CORE/target
     require(not work.exists(),'构建目录已存在；请使用新的工作目录或显式清理本 Core work')
     work.mkdir(parents=True); source=work/'source'
+    print(f'[core-release] {CORE}/{target}: checkout',file=sys.stderr,flush=True)
     run(['git','init',source]);run(['git','-C',source,'remote','add','origin','https://github.com/'+REGISTRY['upstream_repo']+'.git'])
     run(['git','-C',source,'fetch','--depth=1','origin',lock['source']['sha']])
     run(['git','-C',source,'config','core.autocrlf','false']);run(['git','-C',source,'config','core.eol','lf'])
@@ -524,8 +525,10 @@ def build(lock_path,target,output):
     sys.path.insert(0,str(ROOT/'scripts'))
     from build_recipes import build_native
     build_dir=work/'build'
+    print(f'[core-release] {CORE}/{target}: native build',file=sys.stderr,flush=True)
     binary,logs=build_native(CORE,REGISTRY,lock,target,source,build_dir,run)
     require(binary_target(binary.read_bytes())==target,'构建输出架构不符')
+    print(f'[core-release] {CORE}/{target}: ABI verification',file=sys.stderr,flush=True)
     abi=abi_probe(binary)
     expected_name=REGISTRY.get('abi_name','mGBA').lower()
     require(abi['library_name'].lower()==expected_name and abi['library_version'].removeprefix('v').startswith(lock['source']['tag'].removeprefix('v')),'原生 Core 版本不符')
@@ -537,7 +540,9 @@ def build(lock_path,target,output):
         evidence['sdk']=run(['xcrun','--show-sdk-version']);evidence['binary_load_commands']=run(['otool','-l',binary])
     if target.startswith('linux'): evidence['symbol_versions']=run(['readelf','--version-info',binary])
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
-    archive=output/f'{CORE}-source-{lock["source"]["sha"]}.tar.gz';archive_source(source,archive)
+    archive=output/f'{CORE}-source-{lock["source"]["sha"]}.tar.gz'
+    print(f'[core-release] {CORE}/{target}: corresponding source archive',file=sys.stderr,flush=True)
+    archive_source(source,archive)
     evidence['source_archive']={'file':archive.name,'sha256':sha256(archive),'size_bytes':archive.stat().st_size}
     notice_paths=REGISTRY.get('license_files',['LICENSE','src/third-party/inih/LICENSE.txt','src/third-party/blip_buf/license.txt'])
     license_files=[source/name for name in notice_paths]
