@@ -410,6 +410,12 @@ def native_dependencies(binary, target):
     require(all(re.fullmatch(r'(kernel32|user32|advapi32|shell32|ole32|ws2_32|bcrypt|ntdll|ucrtbase|api-ms-win-[\w-]+)\.dll', d, re.I) for d in dlls), 'Windows 非系统动态依赖: ' + listing)
     return listing
 
+def archive_source(source, output):
+    # Git for Windows 的全局 autocrlf 也会影响 git archive；显式使用原始 blob 换行。
+    run(['git', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', '-C', source,
+         'archive', '--format=tar.gz', '--prefix=mgba/', '--output', Path(output).resolve(), 'HEAD'])
+
+
 def build(lock_path, target, output):
     lock = json.loads(Path(lock_path).read_text())
     validate_lock(lock)
@@ -423,6 +429,8 @@ def build(lock_path, target, output):
     run(['git', 'init', source])
     run(['git', '-C', source, 'remote', 'add', 'origin', 'https://github.com/' + REGISTRY['upstream_repo'] + '.git'])
     run(['git', '-C', source, 'fetch', '--depth=1', 'origin', lock['source']['sha']])
+    run(['git', '-C', source, 'config', 'core.autocrlf', 'false'])
+    run(['git', '-C', source, 'config', 'core.eol', 'lf'])
     run(['git', '-C', source, 'checkout', '--detach', 'FETCH_HEAD'])
     require(run(['git', '-C', source, 'rev-parse', 'HEAD']) == lock['source']['sha'], '实际源码 SHA 不符')
     build_dir = work / 'build'
@@ -458,7 +466,7 @@ def build(lock_path, target, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
-    run(['git', '-C', source, 'archive', '--format=tar.gz', '--prefix=mgba/', '--output', archive.resolve(), 'HEAD'])
+    archive_source(source, archive)
     evidence['source_archive'] = {'file':archive.name, 'sha256':sha256(archive), 'size_bytes':archive.stat().st_size}
     license_bundle = work / 'LICENSE'
     notice_paths = [source/'LICENSE', source/'src/third-party/inih/LICENSE.txt',

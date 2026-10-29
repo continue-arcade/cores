@@ -71,6 +71,21 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(core.allocate_cart_version([{'cart_version':'1.2.9'}, {'cart_version':'1.2.10'}]), '1.2.11')
         self.assertEqual(core.allocate_cart_version([{'cart_version':'2.0.0-rc.1'}, {'cart_version':'1.99.1'}]), '2.0.0')
 
+    def test_source_archive_uses_git_blob_bytes_even_when_autocrlf_is_enabled(self):
+        self.assertTrue(hasattr(core, 'archive_source'), '源码归档仍受平台换行配置影响')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(['git','init','-q',root], check=True)
+            subprocess.run(['git','-C',root,'config','core.autocrlf','false'], check=True)
+            (root/'README.txt').write_bytes(b'original source\nsecond line\n')
+            subprocess.run(['git','-C',root,'add','.'], check=True)
+            subprocess.run(['git','-C',root,'-c','user.name=Test','-c','user.email=test@example.com','commit','-qm','fixture'], check=True)
+            subprocess.run(['git','-C',root,'config','core.autocrlf','true'], check=True)
+            archive = root/'source.tar.gz'
+            core.archive_source(root, archive)
+            with tarfile.open(archive) as source:
+                self.assertEqual(source.extractfile('mgba/README.txt').read(), b'original source\nsecond line\n')
+
     def test_dirty_recipe_and_changed_recipe_commit_are_rejected(self):
         self.assertTrue(hasattr(core, 'require_recipe_checkout'), '缺少构建与发布前配方核验')
         with tempfile.TemporaryDirectory() as tmp:

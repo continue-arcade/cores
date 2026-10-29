@@ -34,3 +34,9 @@ Windows 通过 Visual Studio Developer Shell 取得原生编译与 dumpbin 工�
 工作流 https://github.com/continue-arcade/cores/actions/runs/40928260405 的 macOS 与 Linux 构建通过；Windows 在 CMake configure 阶段失败，未创建公开 Release。
 上游 0.10.5 CMakeLists.txt:746 对 Windows 普通 library 路径要求 epoxy，即使 BUILD_SHARED/STATIC 为 OFF 仍触发。
 本仓只构建 mgba_libretro，因此按上游已提供的 SKIP_LIBRARY=ON 跳过普通 library 路径；保持所有原生 ABI、目标和完整性检查。
+
+第二轮 https://github.com/continue-arcade/cores/actions/runs/40928616783 三平台编译、原生 ABI 与依赖检查全部通过。Windows DLL 仅依赖 KERNEL32.dll；Linux 仅 libm/libc/loader。
+汇总验证正确拒绝 Windows 源码归档与另外两目标不一致，未创建 Release。
+下载三个实际归档比较：3017 个成员和 commit pax 一致，Windows 有 1517 个文本因全局 core.autocrlf=true 变为 CRLF（连 git archive 也受影响）。
+将上游 checkout 的仓库级 autocrlf=false/eol=lf 固定，归档命令额外显式覆盖这两个配置，确保采用 Git blob 原始换行；不修改上游任何源码。
+增加真实 Git 仓库回归测试：本地 autocrlf=true 时，生成归档必须仍为最初提交的 LF 字节。该测试先失败再实现，19 项通过。
