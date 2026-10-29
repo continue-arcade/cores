@@ -551,6 +551,15 @@ def build(lock_path,target,output):
     license_files=sorted(set(license_files))
     license_bundle=work/'LICENSE'
     license_bundle.write_text('\n\n'.join(f'=== {p.relative_to(source)} ===\n{p.read_text(encoding="utf-8",errors="replace")}' for p in license_files)+('\nblip-buf Copyright (C) 2003-2009 Shay Green. LGPL-2.1-or-later.\n' if CORE=='mgba' else ''),encoding='utf-8')
+    if CORE=='bsnes' and target.startswith('windows'):
+        runtime_notices={}
+        for name in ['COPYING.RUNTIME','COPYING3']:
+            notice=Path('C:/msys64/mingw64/share/licenses/libgomp')/name
+            require(notice.is_file(),'缺少静态 OpenMP 运行库许可')
+            with license_bundle.open('a',encoding='utf-8') as bundled:
+                bundled.write('\n=== GCC libgomp '+name+' ===\n'+notice.read_text(encoding='utf-8'))
+            runtime_notices[name]=sha256(notice)
+        evidence['toolchain_runtime_notices']=runtime_notices
     runtime={}
     if REGISTRY.get('runtime_assets'):
         assets=source/REGISTRY['runtime_assets']['source']
