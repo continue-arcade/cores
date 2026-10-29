@@ -529,11 +529,12 @@ def build(lock_path,target,output):
     binary,logs=build_native(CORE,REGISTRY,lock,target,source,build_dir,run)
     require(binary_target(binary.read_bytes())==target,'构建输出架构不符')
     print(f'[core-release] {CORE}/{target}: ABI verification',file=sys.stderr,flush=True)
+    dependencies=native_dependencies(binary,target)
     abi=abi_probe(binary)
     expected_name=REGISTRY.get('abi_name','mGBA').lower()
     require(abi['library_name'].lower()==expected_name and abi['library_version'].removeprefix('v').startswith(lock['source']['tag'].removeprefix('v')),'原生 Core 版本不符')
     evidence={'platform':platform.platform(),'machine':platform.machine(),'runner_image':os.environ.get('ImageVersion','local'),
-              'python':sys.version,'cmake':run(['cmake','--version']),'dependencies':native_dependencies(binary,target),'abi':abi,
+              'python':sys.version,'cmake':run(['cmake','--version']),'dependencies':dependencies,'abi':abi,
               'compiler':logs.get('compiler',''),'cmake_cache':logs.get('cmake_cache',''),'build_log':logs['build_log'],
               'configure_log':logs.get('configure_log',''),'submodules':submodules}
     if target.startswith('macos'):

@@ -58,6 +58,9 @@ def build_native(core, registry, lock, target, source, build_dir, run):
             compiler='clang++ -arch arm64' if target.startswith('macos') else os.environ.get('CXX','g++')
         args=['make','-C',source/'bsnes','-j3','target=libretro','binary=library','local=false','platform='+platform_name,'compiler='+compiler]
         if not target.startswith('macos'): args += ['compiler.cpp='+compiler+' -x c++ -std=c++17 -include stdexcept']
+        if target.startswith('windows'):
+            # 上游目标在对象后硬编码 -Bdynamic；随后恢复静态运行库选择。
+            args += ['options=-Wl,-Bstatic -fopenmp -mthreads -lpthread -lws2_32 -lole32 -static -static-libgcc -static-libstdc++ -mwindows -shared -I../sameboy']
         logs['build_log']=run(args)
         search=source/'bsnes/out'
     elif core == 'ppsspp':
