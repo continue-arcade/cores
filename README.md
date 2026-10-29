@@ -78,4 +78,4 @@ GitHub immutable 功能锁定公开 tag 和资产，脚本还检查发布响应�
 
 [试发布 Cart 0.1.0-smoke.1](https://github.com/continue-arcade/cores/releases/tag/mgba/v0.1.0-smoke.1) 已公开，prerelease=true、immutable=true，共 10 个资产。
 [三平台成功工作流](https://github.com/continue-arcade/cores/actions/runs/40929193047)，构建配方 commit `7f119ec`。
-发布后本地检测返回 `update:false`；完整实际构建差异与验证范围见 [验证记录](docs/verification-20261030.md)。
+发布后本地检测返回 `update:false`，[CI 再次运行](https://github.com/continue-arcade/cores/actions/runs/40929847081) 确认 check 成功、build/publish 均 skipped；完整实际构建差异与验证范围见 [验证记录](docs/verification-20261030.md)。

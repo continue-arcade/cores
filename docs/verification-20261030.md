@@ -61,3 +61,12 @@ Windows 静态 CRT，dumpbin 唯一动态依赖 **KERNEL32.dll**，无 VCRUNTIME
 macOS arm64 仅依赖 **Foundation.framework** 与 **libSystem.B.dylib**；部署目标 11.0，没有在旧版 macOS 真机验收。
 
 上述只是源码/原生 ABI/包装/分发证据。实际 ROM、图像、音频、输入、性能和设备兼容仍未验证；矩阵保持三个既定目标。
+
+## 发布后再次运行的零发布验证
+
+工作流 https://github.com/continue-arcade/cores/actions/runs/40929847081 成功完成：check=success，build=skipped，publish=skipped。
+check 使用持久公开 release-report.json 并审计上游 tag，输出 update=false；没有构建包，没有创建或改写 Release。
+此验证在源代码与工具链流程保持可执行的情况下证明：仅重新运行、runner 更新或当天 nightly 变化不会触发重复发布。
+
+已另行将公开 Release 全部 10 个资产下载到隔离目录 `/Volumes/GM9000/continue-cores-release-smoke1`，通过固定 `verify` 命令独立完成三平台包与统一源码归档复核。
+最终本地 `mise run test`：19 项通过，`git diff --check` 通过。发布后的文档补充没有改变任何 `.cart`、报告、源码归档或校验资产。
