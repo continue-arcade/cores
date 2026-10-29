@@ -37,6 +37,7 @@ mise run core-release -- inspect-prebuilt mgba --previous observation.json --out
 
 观察结果按实际版本和可识别 revision 比较：版本提升或 revision 变化为 `update`；同版本同 revision 的例行重建为 `unchanged`；缺少 revision 且仅包体变化为 `candidate`。第一次观察为 `initial`，降级也只列候选。这个入口供人工采用快照前核对，不会绕过每日正式版本主线自动发布。
 当前官方包自报版本可能领先正式版。例如 2026-10-30 的 macOS mGBA 包为 `0.11-212-7a12d6d`，封装的资源版本为 `0.11.0-snapshot.7a12d6d`；正式 0.10.5 只作触发/兜底参考。
+真实下载、封装及无更新 CI 结果见[混合供应验收](docs/hybrid-prebuilt-verification-20261030.md)。
 
 `prepare` 要求配方已提交；`build` 与 `publish` 都要求 tracked 工作区干净，checkout 与锁中的配方 commit 一致，
 并逐项核对脚本、登记、mise 配置和工作流的实际 SHA-256 与提交内容。
