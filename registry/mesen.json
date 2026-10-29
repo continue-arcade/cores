@@ -1,0 +1,34 @@
+{
+  "release_repo": "continue-arcade/cores",
+  "targets": [
+    "macos-aarch64",
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "recipe_revision": 1,
+  "cmake_options": {},
+  "upstream_repo": "SourMesen/Mesen",
+  "bootstrap": {
+    "tag": "0.9.9",
+    "sha": "f3a18bed018fa853627e0e15d02a3f2ba4960222",
+    "cart_version": "0.1.0-smoke.1"
+  },
+  "name": "Mesen",
+  "author": "Mesen Contributors",
+  "license": "GPL-3.0-or-later",
+  "license_marker": "GNU GENERAL PUBLIC LICENSE",
+  "tag_pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$",
+  "builder": "mesen",
+  "platforms": [
+    "nes"
+  ],
+  "license_files": [
+    "LICENSE"
+  ],
+  "required_source_files": [
+    "LICENSE",
+    "Libretro/Makefile",
+    "Libretro/libretro.cpp"
+  ],
+  "abi_name": "Mesen"
+}

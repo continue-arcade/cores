@@ -3,6 +3,9 @@
 import argparse
 import ctypes
 import hashlib
+import gzip
+import io
+import posixpath
 import json
 import os
 import platform
@@ -20,12 +23,13 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+CORE = 'mgba'
 REGISTRY = json.loads((ROOT / 'registry/mgba.json').read_text())
 TARGETS = REGISTRY['targets']
 CART_ID = 'org.continue.core.mgba'
 RESOURCE_ID = 'org.continue.resource.core.mgba'
 STABLE = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')
-RECIPE_FILES = ('scripts/core_release.py', 'registry/mgba.json', 'mise.toml', '.github/workflows/release.yml')
+RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', 'registry/mgba.json', 'mise.toml', '.github/workflows/release.yml')
 SEMVER = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$')
 
 class ReleaseError(Exception):
@@ -34,6 +38,35 @@ class ReleaseError(Exception):
 def require(condition, message):
     if not condition:
         raise ReleaseError(message)
+
+def select_core(name):
+    global CORE, REGISTRY, TARGETS, CART_ID, RESOURCE_ID, STABLE, RECIPE_FILES
+    require(re.fullmatch(r'[a-z][a-z0-9-]*', name), 'Core 名称无效')
+    path = ROOT / 'registry' / (name + '.json')
+    require(path.is_file(), 'Core 未登记')
+    CORE = name
+    REGISTRY = json.loads(path.read_text())
+    TARGETS = REGISTRY['targets']
+    CART_ID = 'org.continue.core.' + name
+    RESOURCE_ID = 'org.continue.resource.core.' + name
+    STABLE = re.compile(REGISTRY.get('tag_pattern', r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'))
+    RECIPE_FILES = ('scripts/core_release.py', 'scripts/build_recipes.py', f'registry/{name}.json', 'mise.toml', '.github/workflows/release.yml')
+
+
+def source_version(tag):
+    require(STABLE.fullmatch(tag), '正式版本格式错误')
+    parts = tag.removeprefix('v').split('.')
+    return '.'.join(parts + ['0'] * (3 - len(parts)))
+
+
+def core_name():
+    return REGISTRY.get('name', 'mGBA')
+
+
+def activate_lock(lock):
+    name = lock['cart_id'].removeprefix('org.continue.core.')
+    select_core(name)
+
 
 def write_json(path, value):
     path = Path(path)
@@ -96,7 +129,7 @@ def resolve_tag(tag):
 
 def version_tuple(tag):
     require(STABLE.fullmatch(tag), '正式版本格式错误')
-    return tuple(map(int, tag.split('.')))
+    return tuple(map(int, source_version(tag).split('.')))
 
 def select_candidate(releases, adopted, resolver):
     # 先审计所有已采用 tag，旧 tag 被移动也必须报错。
@@ -115,7 +148,7 @@ def published_sources():
     sources = []
     repo = REGISTRY['release_repo']
     for release in pages(f'repos/{repo}/releases'):
-        if release['draft'] or not release['tag_name'].startswith('mgba/v'):
+        if release['draft'] or not release['tag_name'].startswith(CORE + '/v'):
             continue
         assets = [a for a in release['assets'] if a['name'] == 'release-report.json']
         require(len(assets) == 1, f'发布缺失持久来源账本: {release["tag_name"]}')
@@ -159,8 +192,8 @@ def require_recipe_checkout(lock, root=ROOT):
 def make_lock(tag, sha, cart_version, recipe_commit):
     lock = {'schema': 'continue.core-release.v1', 'cart_id': CART_ID,
             'resource_id': RESOURCE_ID, 'cart_version': cart_version,
-            'release_tag': 'mgba/v' + cart_version,
-            'source': {'repo': REGISTRY['upstream_repo'], 'tag': tag, 'version': tag, 'sha': sha},
+            'release_tag': CORE + '/v' + cart_version,
+            'source': {'repo': REGISTRY['upstream_repo'], 'tag': tag, 'version': source_version(tag), 'sha': sha},
             'recipe': {'revision': REGISTRY['recipe_revision'], 'commit': recipe_commit,
                        'cmake_options': REGISTRY['cmake_options'],
                        'files':{name:sha256(ROOT/name) for name in RECIPE_FILES}},
@@ -172,11 +205,11 @@ def validate_lock(lock):
     require(lock['cart_id'] == CART_ID and lock['resource_id'] == RESOURCE_ID, '锁定身份不符')
     source = lock['source']
     require(source['repo'] == REGISTRY['upstream_repo'] and STABLE.fullmatch(source['tag'])
-            and source['version'] == source['tag'] and re.fullmatch('[0-9a-f]{40}', source['sha']), '来源锁定无效')
+            and source['version'] == source_version(source['tag']) and re.fullmatch('[0-9a-f]{40}', source['sha']), '来源锁定无效')
     if source['tag'] == REGISTRY['bootstrap']['tag']:
         require(source['sha'] == REGISTRY['bootstrap']['sha'], '来源与已审计 bootstrap SHA 不符')
     require(SEMVER.fullmatch(lock['cart_version']), 'Cart 版本必须是 SemVer')
-    require(lock['release_tag'] == 'mgba/v' + lock['cart_version'], '发布 tag 不符')
+    require(lock['release_tag'] == CORE + '/v' + lock['cart_version'], '发布 tag 不符')
     require(lock['targets'] == TARGETS, '目标集合不符')
     require(lock['recipe']['cmake_options'] == REGISTRY['cmake_options']
             and lock['recipe']['revision'] == REGISTRY['recipe_revision']
@@ -217,7 +250,7 @@ def binary_target(data):
 def extension(target):
     return { 'macos': 'dylib', 'linux': 'so', 'windows': 'dll'}[target.split('-')[0]]
 
-def package(lock, target, binary, license_path, evidence, output):
+def package(lock, target, binary, license_path, evidence, output, runtime_files=None):
     validate_lock(lock)
     require(target in TARGETS, '未知目标')
     data = Path(binary).read_bytes()
@@ -225,15 +258,18 @@ def package(lock, target, binary, license_path, evidence, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     system, arch = target.split('-')
-    filename = f'mgba-{lock["cart_version"]}-{target}.cart'
-    entry = f'targets/{target}/mgba.{extension(target)}'
+    filename = f'{CORE}-{lock["cart_version"]}-{target}.cart'
+    entry = f'targets/{target}/{CORE}.{extension(target)}'
+    author = REGISTRY.get('author', 'mGBA Contributors')
+    license_id = REGISTRY.get('license', 'MPL-2.0')
+    platforms = REGISTRY.get('platforms', ['gba','gbc','gb'])
     manifest = f'''schema = "continue.cartfile.v1"
 id = "{CART_ID}"
-name = "mGBA Core"
+name = "{core_name()} Core"
 version = "{lock['cart_version']}"
-author = "mGBA Contributors"
+author = "{author}"
 publisher = "Continue"
-description = "由 Continue 从 mGBA 正式源码构建的 libretro core。"
+description = "由 Continue 从正式源码构建的 Libretro Core。"
 [artifact]
 format = "cart.zip.v1"
 [artifact.target]
@@ -245,41 +281,62 @@ paths = ["cores/", "LICENSE", "SOURCE.md", "build-report.json"]
     resource = f'''schema = "continue.resource.v1"
 type = "core"
 id = "{RESOURCE_ID}"
-name = "mGBA"
+name = "{core_name()}"
 version = "{lock['source']['version']}"
-author = "mGBA Contributors"
-license = "MPL-2.0"
-description = "正式版 mGBA，Continue 源码构建。"
+author = "{author}"
+license = "{license_id}"
+description = "正式版 Core，Continue 源码构建。"
 [entrypoints]
 {system}_{arch} = "{entry}"
 [[targets]]
 os = "{system}"
 arch = "{arch}"
 [core]
-platforms = ["gba", "gbc", "gb"]
+platforms = {json.dumps(platforms)}
 '''
+    runtime_files = runtime_files or {}
+    prefix = f'cores/{CORE}/'
+    for name in runtime_files:
+        require(name.startswith(prefix) and '..' not in name.split('/') and '\\' not in name, '运行资源路径不安全')
+    evidence = dict(evidence)
+    if runtime_files:
+        evidence['runtime_files'] = {name:digest(body) for name, body in sorted(runtime_files.items())}
+        resource += 'system_directory = "system"\n'
+    elif REGISTRY.get('runtime_assets'):
+        raise ReleaseError('缺少 Core 必需运行资源')
     source = lock['source']
-    source_text = f'''# mGBA 对应源码与许可\n\n上游：https://github.com/{source['repo']}\n正式 tag：{source['tag']}\n完整 commit：{source['sha']}\n对应源码：https://github.com/{source['repo']}/tree/{source['sha']}\n下载归档：https://github.com/{source['repo']}/archive/{source['sha']}.tar.gz\n本次 Release 另附 mgba-source-{source['sha']}.tar.gz（git archive 原始源码与第三方许可）。\n\n构建配方：https://github.com/{REGISTRY['release_repo']}/tree/{lock['recipe']['commit']}\n本包未修改上游源文件。mGBA 采用 MPL-2.0；完整许可见 LICENSE。\n嵌入第三方源码与各自许可保留在对应源码归档 src/third-party 与 include 目录。\nContinue 的打包脚本采用 MIT，不改变上游许可。\n\n禁用外部可选依赖：FFmpeg、zlib、PNG、zip、SQLite、Lua、LZMA、调试器及前端。\n本配方针对未压缩 ROM；不承诺被禁用功能或完整模拟器 UI。\n原生 ABI 检查不代表实际 ROM、图像、音频、输入或性能验收。\n'''
+    source_text = f'''# {core_name()} 对应源码与许可
+
+上游：https://github.com/{source['repo']}
+正式 tag：{source['tag']}
+完整 commit：{source['sha']}
+对应源码：https://github.com/{source['repo']}/tree/{source['sha']}
+本次 Release 另附 {CORE}-source-{source['sha']}.tar.gz，包含固定子模块的对应源码与原始许可。
+构建配方：https://github.com/{REGISTRY['release_repo']}/tree/{lock['recipe']['commit']}
+本包未修改上游源文件。完整许可与嵌入第三方声明见 LICENSE 及对应源码。
+Core 与 Cart 发布版本分别记录；原生 ABI 检查不代表 ROM、画面、声音或性能验收。
+'''
+    if runtime_files:
+        source_text += '\nPPSSPP 运行时必须将本资源的 system/PPSSPP 目录映射到 Libretro system/PPSSPP。随包资源来自同一正式源码，不包含用户游戏、存档或外部固件。\n'
     build_report = {'lock': lock, 'target': target, 'binary_sha256': digest(data),
                     'binary_size_bytes': len(data), 'evidence': evidence}
-    files = {'cartfile.toml': manifest.encode(), 'cores/mgba/continue.toml': resource.encode(),
-             'cores/mgba/' + entry: data, 'LICENSE': Path(license_path).read_bytes(),
-             'SOURCE.md': source_text.encode(),
-             'build-report.json': (json.dumps(build_report, indent=2, ensure_ascii=False)+'\n').encode()}
+    files = {'cartfile.toml':manifest.encode(), prefix+'continue.toml':resource.encode(), prefix+entry:data,
+             'LICENSE':Path(license_path).read_bytes(), 'SOURCE.md':source_text.encode(),
+             'build-report.json':(json.dumps(build_report,indent=2,ensure_ascii=False)+'\n').encode(), **runtime_files}
     path = output / filename
     require(not path.exists(), '拒绝覆盖本地已有 Cart；请使用新的输出目录')
-    # 固定容器元数据；原生编译仍受已记录的工具链和系统环境影响。
-    with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for name, content in sorted(files.items()):
-            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+    with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as archive:
+        for name,content in sorted(files.items()):
+            info = zipfile.ZipInfo(name,date_time=(2026,1,1,0,0,0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
-            archive.writestr(info, content)
-    report = {**build_report, 'file': filename, 'sha256': sha256(path), 'size_bytes': path.stat().st_size}
-    verify_package(path, report, lock)
-    write_json(output / f'{target}.report.json', report)
-    write_json(output / 'input-lock.json', lock)
+            archive.writestr(info,content)
+    report = {**build_report,'file':filename,'sha256':sha256(path),'size_bytes':path.stat().st_size}
+    verify_package(path,report,lock)
+    write_json(output/f'{target}.report.json',report)
+    write_json(output/'input-lock.json',lock)
     return report
+
 
 def verify_package(path, report, lock):
     validate_lock(lock)
@@ -287,58 +344,65 @@ def verify_package(path, report, lock):
     require(path.stat().st_size == report['size_bytes'], 'Cart 大小不符')
     require(sha256(path) == report['sha256'], 'Cart 摘要不符')
     require(report['lock'] == lock, '逐包锁定来源不符')
-    target = report['target']
-    require(target in lock['targets'], '包目标不符')
-    system, arch = target.split('-')
+    target = report['target']; require(target in lock['targets'],'包目标不符')
+    system,arch = target.split('-'); prefix=f'cores/{CORE}/'
     with zipfile.ZipFile(path) as archive:
-        names = archive.namelist()
-        require(len(names) == len(set(names)), 'ZIP 含重复路径')
-        require(all(not n.startswith('/') and '..' not in n.split('/') and '\\' not in n for n in names), 'ZIP 路径不安全')
-        manifest = tomllib.loads(archive.read('cartfile.toml').decode())
-        resource = tomllib.loads(archive.read('cores/mgba/continue.toml').decode())
-        require(manifest['schema'] == 'continue.cartfile.v1' and manifest['id'] == CART_ID
-                and manifest['version'] == lock['cart_version'], 'Cart 身份不符')
-        require(manifest['artifact'] == {'format': 'cart.zip.v1', 'target': {'os':system, 'arch':arch}}, 'Cart 目标不符')
-        require(resource['schema'] == 'continue.resource.v1' and resource['type'] == 'core'
-                and resource['id'] == RESOURCE_ID and resource['version'] == lock['source']['version'], '资源身份不符')
-        entry = f'targets/{target}/mgba.{extension(target)}'
-        require(resource['entrypoints'] == {f'{system}_{arch}': entry}
-                and resource['targets'] == [{'os':system, 'arch':arch}], '资源目标或入口不符')
-        data = archive.read('cores/mgba/' + entry)
-        require(binary_target(data) == target, '二进制目标不符')
-        require(digest(data) == report['binary_sha256'] and len(data) == report['binary_size_bytes'], '二进制摘要或大小不符')
-        inner = json.loads(archive.read('build-report.json'))
-        require(inner == {k: report[k] for k in ('lock', 'target', 'binary_sha256', 'binary_size_bytes', 'evidence')}, '内外构建报告不一致')
-        require(lock['source']['sha'] in archive.read('SOURCE.md').decode()
-                and b'Mozilla Public License' in archive.read('LICENSE'), '来源或许可缺失')
-        expected = {'cartfile.toml', 'cores/mgba/continue.toml', 'cores/mgba/' + entry,
-                    'LICENSE', 'SOURCE.md', 'build-report.json'}
-        require(set(names) == expected, '包内出现未登记文件')
+        names=archive.namelist()
+        require(len(names)==len(set(names)), 'ZIP 含重复路径')
+        require(all(not n.startswith('/') and '..' not in n.split('/') and '\\' not in n for n in names),'ZIP 路径不安全')
+        manifest=tomllib.loads(archive.read('cartfile.toml').decode())
+        resource=tomllib.loads(archive.read(prefix+'continue.toml').decode())
+        require(manifest['schema']=='continue.cartfile.v1' and manifest['id']==CART_ID and manifest['version']==lock['cart_version'],'Cart 身份不符')
+        require(manifest['artifact']=={'format':'cart.zip.v1','target':{'os':system,'arch':arch}},'Cart 目标不符')
+        require(resource['schema']=='continue.resource.v1' and resource['type']=='core' and resource['id']==RESOURCE_ID and resource['version']==lock['source']['version'],'资源身份不符')
+        entry=f'targets/{target}/{CORE}.{extension(target)}'
+        require(resource['entrypoints']=={f'{system}_{arch}':entry} and resource['targets']==[{'os':system,'arch':arch}],'资源目标或入口不符')
+        data=archive.read(prefix+entry)
+        require(binary_target(data)==target,'二进制目标不符')
+        require(digest(data)==report['binary_sha256'] and len(data)==report['binary_size_bytes'],'二进制摘要或大小不符')
+        inner=json.loads(archive.read('build-report.json'))
+        require(inner=={k:report[k] for k in ('lock','target','binary_sha256','binary_size_bytes','evidence')},'内外构建报告不一致')
+        marker=REGISTRY.get('license_marker','Mozilla Public License').encode()
+        require(lock['source']['sha'] in archive.read('SOURCE.md').decode() and marker in archive.read('LICENSE'),'来源或许可缺失')
+        runtime=report['evidence'].get('runtime_files',{})
+        for name,expected in runtime.items():
+            require(name.startswith(prefix) and digest(archive.read(name))==expected,'运行资源摘要不符')
+        if REGISTRY.get('runtime_assets'):
+            dest=prefix+REGISTRY['runtime_assets']['destination']+'/'
+            require(resource['core'].get('system_directory')=='system','运行资源目录未声明')
+            for required in REGISTRY['required_runtime_assets']:
+                require(dest+required in runtime or any(n.startswith(dest+required+'/') for n in runtime),'缺少 Core 必需运行资源')
+        expected={'cartfile.toml',prefix+'continue.toml',prefix+entry,'LICENSE','SOURCE.md','build-report.json'} | set(runtime)
+        require(set(names)==expected,'包内出现未登记文件')
     return report
 
 def verify_source_archive(archive_path, lock, reports):
-    expected = {'file':archive_path.name, 'sha256':sha256(archive_path), 'size_bytes':archive_path.stat().st_size}
-    require(all(r['evidence'].get('source_archive') == expected for r in reports), '源码归档与逐目标构建报告摘要不符')
+    expected={'file':archive_path.name,'sha256':sha256(archive_path),'size_bytes':archive_path.stat().st_size}
+    require(all(r['evidence'].get('source_archive')==expected for r in reports),'源码归档与逐目标构建报告摘要不符')
     try:
-        with tarfile.open(archive_path, 'r:gz') as archive:
-            members = archive.getmembers()
-            names = [m.name for m in members]
-            require(len(names) == len(set(names)) and len(names) < 100000, '源码归档路径重复或过多')
-            require(all((m.name == 'mgba' or m.name.startswith('mgba/')) and '..' not in m.name.split('/')
-                        and '\\' not in m.name and (m.isfile() or m.isdir()) for m in members), '源码归档路径或类型不安全')
-            require(archive.pax_headers.get('comment') == lock['source']['sha'], '源码归档 commit 身份不符')
-            required = ['mgba/version.cmake', 'mgba/CMakeLists.txt', 'mgba/LICENSE',
-                        'mgba/src/third-party/inih/LICENSE.txt', 'mgba/src/third-party/blip_buf/license.txt']
-            require(all(name in names for name in required), '源码归档缺少正式构建源码或许可')
-            require(sum(m.size for m in members) <= 1024*1024*1024, '源码归档展开大小超限')
-            version_file = archive.extractfile('mgba/version.cmake').read().decode()
-            actual = '.'.join(re.search(r'set\(LIB_VERSION_' + part + r'\s+(\d+)\)', version_file)[1] for part in ('MAJOR', 'MINOR', 'PATCH'))
-            require(actual == lock['source']['version'], '源码归档 Core 版本身份不符')
-            require(b'Mozilla Public License' in archive.extractfile('mgba/LICENSE').read(), '源码归档许可不符')
-    except (tarfile.TarError, OSError, KeyError, AttributeError, TypeError) as error:
+        with tarfile.open(archive_path,'r:gz') as archive:
+            members=archive.getmembers(); names=[m.name for m in members]
+            require(len(names)==len(set(names)) and len(names)<100000,'源码归档路径重复或过多')
+            for member in members:
+                require((member.name==CORE or member.name.startswith(CORE+'/')) and '..' not in member.name.split('/') and '\\' not in member.name,'源码归档路径不安全')
+                require(member.isfile() or member.isdir() or member.issym(),'源码归档类型不安全')
+                if member.issym():
+                    resolved=posixpath.normpath(posixpath.join(posixpath.dirname(member.name),member.linkname))
+                    require(not member.linkname.startswith('/') and resolved.startswith(CORE+'/'),'源码符号链接越界')
+            require(archive.pax_headers.get('comment')==lock['source']['sha'],'源码归档 commit 身份不符')
+            required=REGISTRY.get('required_source_files',['version.cmake','CMakeLists.txt','LICENSE','src/third-party/inih/LICENSE.txt','src/third-party/blip_buf/license.txt'])
+            require(all(CORE+'/'+name in names for name in required),'源码归档缺少正式构建源码或许可')
+            require(sum(m.size for m in members)<=2*1024*1024*1024,'源码归档展开大小超限')
+            license_file=REGISTRY.get('license_files',['LICENSE'])[0]
+            marker=REGISTRY.get('license_marker','Mozilla Public License').encode()
+            require(marker in archive.extractfile(CORE+'/'+license_file).read(),'源码归档许可不符')
+            if CORE=='mgba':
+                text=archive.extractfile('mgba/version.cmake').read().decode()
+                actual='.'.join(re.search(r'set\(LIB_VERSION_'+part+r'\s+(\d+)\)',text)[1] for part in ('MAJOR','MINOR','PATCH'))
+                require(actual==lock['source']['version'],'源码归档 Core 版本身份不符')
+    except (tarfile.TarError,OSError,KeyError,AttributeError,TypeError) as error:
         raise ReleaseError('源码归档格式或身份无效') from error
     return expected
-
 
 def verify_release(directory):
     directory = Path(directory)
@@ -349,7 +413,7 @@ def verify_release(directory):
     for report in reports:
         verify_package(directory / report['file'], report, lock)
     require({p.name for p in directory.glob('*.cart')} == {r['file'] for r in reports}, '存在未登记 Cart')
-    archive = directory / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
+    archive = directory / f'{CORE}-source-{lock["source"]["sha"]}.tar.gz'
     require(archive.is_file(), '发布缺失对应源码归档')
     summary = {'schema': 'continue.core-release-report.v1', 'lock': lock, 'artifacts': reports,
                'source_archive': verify_source_archive(archive, lock, reports)}
@@ -402,78 +466,93 @@ def native_dependencies(binary, target):
         listing = run(['ldd', binary])
         require('not found' not in listing, 'Linux 动态依赖缺失')
         names = [line.strip().split()[0] for line in listing.splitlines() if line.strip()]
-        allowed = re.compile(r'^(linux-vdso|lib(c|m|pthread|dl|rt|gcc_s)\.so|/lib\S*/ld-linux)')
+        allowed = re.compile(r'^(linux-vdso|lib(c|m|pthread|dl|rt|gcc_s|gomp|stdc\+\+|GL|GLX|GLdispatch|OpenGL|X11|Xext|xcb|Xau|Xdmcp|bsd|md)\.so|/lib\S*/ld-linux)')
         require(all(allowed.match(n) for n in names), 'Linux 非预期动态依赖: ' + listing)
         return listing
     listing = run(['dumpbin', '/dependents', binary])
     dlls = re.findall(r'^\s+([\w.-]+\.dll)\s*$', listing, re.M | re.I)
-    require(all(re.fullmatch(r'(kernel32|user32|advapi32|shell32|ole32|ws2_32|bcrypt|ntdll|ucrtbase|api-ms-win-[\w-]+)\.dll', d, re.I) for d in dlls), 'Windows 非系统动态依赖: ' + listing)
+    require(all(re.fullmatch(r'(kernel32|user32|advapi32|shell32|ole32|oleaut32|ws2_32|shlwapi|winmm|comdlg32|gdi32|opengl32|d3dcompiler_47|d3d11|dxgi|dinput8|xinput1_4|hid|version|setupapi|dwmapi|imm32|bcrypt|ntdll|msvcrt|ucrtbase|api-ms-win-[\w-]+)\.dll', d, re.I) for d in dlls), 'Windows 非系统动态依赖: ' + listing)
     return listing
 
 def archive_source(source, output):
-    # Git for Windows 的全局 autocrlf 也会影响 git archive；显式使用原始 blob 换行。
-    run(['git', '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', '-C', source,
-         'archive', '--format=tar.gz', '--prefix=mgba/', '--output', Path(output).resolve(), 'HEAD'])
+    repositories=[('',Path(source))]
+    if REGISTRY.get('submodules'):
+        for row in run(['git','submodule','status','--recursive'],source).splitlines():
+            require(row and row[0] not in '-+U','子模块未固定或未初始化')
+            path=row.strip().split()[1]
+            require('..' not in path.split('/') and not path.startswith('/'),'子模块路径不安全')
+            repositories.append((path+'/',Path(source)/path))
+    # 同一 Git blob → 确定性 tar/gzip；递归子模块也保留在对应位置。
+    sha=run(['git','rev-parse','HEAD'],source)
+    with Path(output).open('wb') as raw:
+        with gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed,mode='w',format=tarfile.PAX_FORMAT,pax_headers={'comment':sha}) as target:
+                names=set()
+                for subdir,repository in repositories:
+                    archived=subprocess.run(['git','-c','core.autocrlf=false','-c','core.eol=lf','-C',str(repository),'archive','--format=tar','HEAD'],stdout=subprocess.PIPE,check=True).stdout
+                    with tarfile.open(fileobj=io.BytesIO(archived),mode='r:') as original:
+                        for member in original:
+                            member.name=CORE+'/'+subdir+member.name
+                            # 主归档中的 gitlink 目录由子模块内容填充，重复空目录仅收一次。
+                            if member.name in names and member.isdir(): continue
+                            require(member.name not in names,'源码归档路径冲突')
+                            names.add(member.name); member.pax_headers={}
+                            target.addfile(member,original.extractfile(member) if member.isfile() else None)
 
 
-def build(lock_path, target, output):
-    lock = json.loads(Path(lock_path).read_text())
-    validate_lock(lock)
-    require(native_target() == target, f'必须在对应原生目标构建: 本机 {native_target()}, 请求 {target}')
+def build(lock_path,target,output):
+    lock=json.loads(Path(lock_path).read_text()); validate_lock(lock)
+    require(native_target()==target,f'必须在对应原生目标构建: 本机 {native_target()}, 请求 {target}')
     require_recipe_checkout(lock)
-    require(resolve_tag(lock['source']['tag']) == lock['source']['sha'], '准备后来源 tag 移动')
-    work = ROOT / 'work' / target
-    require(not work.exists(), '构建目录已存在；请显式移除 work 后重试')
-    work.mkdir(parents=True)
-    source = work / 'source'
-    run(['git', 'init', source])
-    run(['git', '-C', source, 'remote', 'add', 'origin', 'https://github.com/' + REGISTRY['upstream_repo'] + '.git'])
-    run(['git', '-C', source, 'fetch', '--depth=1', 'origin', lock['source']['sha']])
-    run(['git', '-C', source, 'config', 'core.autocrlf', 'false'])
-    run(['git', '-C', source, 'config', 'core.eol', 'lf'])
-    run(['git', '-C', source, 'checkout', '--detach', 'FETCH_HEAD'])
-    require(run(['git', '-C', source, 'rev-parse', 'HEAD']) == lock['source']['sha'], '实际源码 SHA 不符')
-    build_dir = work / 'build'
-    options = [f'-D{k}={v}' for k, v in lock['recipe']['cmake_options'].items()]
-    options += ['-DSKIP_GIT=ON', f'-DGIT_TAG={lock["source"]["tag"]}', f'-DGIT_COMMIT={lock["source"]["sha"]}']
-    if target.startswith('windows'):
-        options += ['-G', 'Visual Studio 17 2022', '-A', 'x64', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded',
-                    '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW']
-    else:
-        options += ['-G', 'Unix Makefiles']
+    require(resolve_tag(lock['source']['tag'])==lock['source']['sha'],'准备后来源 tag 移动')
+    work=ROOT/'work'/CORE/target
+    require(not work.exists(),'构建目录已存在；请使用新的工作目录或显式清理本 Core work')
+    work.mkdir(parents=True); source=work/'source'
+    run(['git','init',source]);run(['git','-C',source,'remote','add','origin','https://github.com/'+REGISTRY['upstream_repo']+'.git'])
+    run(['git','-C',source,'fetch','--depth=1','origin',lock['source']['sha']])
+    run(['git','-C',source,'config','core.autocrlf','false']);run(['git','-C',source,'config','core.eol','lf'])
+    run(['git','-C',source,'checkout','--detach','FETCH_HEAD'])
+    # annotated tag 的对象身份也保留，PPSSPP 用它生成准确版本字符串。
+    run(['git','-C',source,'fetch','--depth=1','origin','refs/tags/'+lock['source']['tag']+':refs/tags/'+lock['source']['tag']])
+    require(run(['git','-C',source,'rev-parse','HEAD'])==lock['source']['sha'],'实际源码 SHA 不符')
+    submodules=''
+    if REGISTRY.get('submodules'):
+        run(['git','-C',source,'-c','protocol.file.allow=never','submodule','update','--init','--recursive','--depth=1'])
+        submodules=run(['git','submodule','status','--recursive'],source)
+        require(all(not row.startswith(('-', '+','U')) for row in submodules.splitlines()),'子模块未固定')
+    sys.path.insert(0,str(ROOT/'scripts'))
+    from build_recipes import build_native
+    build_dir=work/'build'
+    binary,logs=build_native(CORE,REGISTRY,lock,target,source,build_dir,run)
+    require(binary_target(binary.read_bytes())==target,'构建输出架构不符')
+    abi=abi_probe(binary)
+    expected_name=REGISTRY.get('abi_name','mGBA').lower()
+    require(abi['library_name'].lower()==expected_name and abi['library_version'].removeprefix('v').startswith(lock['source']['tag'].removeprefix('v')),'原生 Core 版本不符')
+    evidence={'platform':platform.platform(),'machine':platform.machine(),'runner_image':os.environ.get('ImageVersion','local'),
+              'python':sys.version,'cmake':run(['cmake','--version']),'dependencies':native_dependencies(binary,target),'abi':abi,
+              'compiler':logs.get('compiler',''),'cmake_cache':logs.get('cmake_cache',''),'build_log':logs['build_log'],
+              'configure_log':logs.get('configure_log',''),'submodules':submodules}
     if target.startswith('macos'):
-        options += ['-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0']
-    configure_log = run(['cmake', '-S', source, '-B', build_dir, *options])
-    build_log = run(['cmake', '--build', build_dir, '--config', 'Release', '--target', 'mgba_libretro', '--parallel', '3'])
-    candidates = list(build_dir.rglob('*libretro.' + extension(target)))
-    require(len(candidates) == 1, '无法确定唯一 libretro 构建输出')
-    binary = candidates[0]
-    require(binary_target(binary.read_bytes()) == target, '构建输出架构不符')
-    abi = abi_probe(binary)
-    require(abi['library_name'].lower() == 'mgba' and abi['library_version'].startswith(lock['source']['version']), '原生 Core 版本不符')
-    evidence = {'platform': platform.platform(), 'machine': platform.machine(),
-                'runner_image': os.environ.get('ImageVersion', 'local'),
-                'python': sys.version, 'cmake': run(['cmake', '--version']),
-                'compiler': '\n'.join(p.read_text() for p in sorted(build_dir.rglob('CMakeCCompiler.cmake'))),
-                'dependencies': native_dependencies(binary, target), 'abi': abi,
-                'cmake_cache': (build_dir / 'CMakeCache.txt').read_text(),
-                'configure_log': configure_log, 'build_log': build_log}
-    if target.startswith('macos'):
-        evidence['sdk'] = run(['xcrun', '--show-sdk-version'])
-        evidence['binary_load_commands'] = run(['otool', '-l', binary])
-    if target.startswith('linux'):
-        evidence['symbol_versions'] = run(['readelf', '--version-info', binary])
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
-    archive = output / f'mgba-source-{lock["source"]["sha"]}.tar.gz'
-    archive_source(source, archive)
-    evidence['source_archive'] = {'file':archive.name, 'sha256':sha256(archive), 'size_bytes':archive.stat().st_size}
-    license_bundle = work / 'LICENSE'
-    notice_paths = [source/'LICENSE', source/'src/third-party/inih/LICENSE.txt',
-                    source/'src/third-party/blip_buf/license.txt']
-    license_bundle.write_text('\n\n'.join(f'=== {p.relative_to(source)} ===\n{p.read_text()}' for p in notice_paths)
-                              + '\n\nblip-buf Copyright (C) 2003-2009 Shay Green. LGPL-2.1-or-later.\n', encoding='utf-8')
-    return package(lock, target, binary, license_bundle, evidence, output)
+        evidence['sdk']=run(['xcrun','--show-sdk-version']);evidence['binary_load_commands']=run(['otool','-l',binary])
+    if target.startswith('linux'): evidence['symbol_versions']=run(['readelf','--version-info',binary])
+    output=Path(output);output.mkdir(parents=True,exist_ok=True)
+    archive=output/f'{CORE}-source-{lock["source"]["sha"]}.tar.gz';archive_source(source,archive)
+    evidence['source_archive']={'file':archive.name,'sha256':sha256(archive),'size_bytes':archive.stat().st_size}
+    notice_paths=REGISTRY.get('license_files',['LICENSE','src/third-party/inih/LICENSE.txt','src/third-party/blip_buf/license.txt'])
+    license_files=[source/name for name in notice_paths]
+    if REGISTRY.get('submodules'):
+        license_files += [p for p in source.rglob('*') if p.is_file() and not p.is_symlink() and '.git' not in p.parts and re.match(r'^(licen[sc]e|copying|notice|copyright)',p.name,re.I)]
+    license_files=sorted(set(license_files))
+    license_bundle=work/'LICENSE'
+    license_bundle.write_text('\n\n'.join(f'=== {p.relative_to(source)} ===\n{p.read_text(encoding="utf-8",errors="replace")}' for p in license_files)+('\nblip-buf Copyright (C) 2003-2009 Shay Green. LGPL-2.1-or-later.\n' if CORE=='mgba' else ''),encoding='utf-8')
+    runtime={}
+    if REGISTRY.get('runtime_assets'):
+        assets=source/REGISTRY['runtime_assets']['source']
+        for required in REGISTRY['required_runtime_assets']: require((assets/required).exists(),'缺少必需运行资源: '+required)
+        for path in sorted(assets.rglob('*')):
+            require(not path.is_symlink(),'运行资源不接受符号链接')
+            if path.is_file(): runtime[f'cores/{CORE}/'+REGISTRY['runtime_assets']['destination']+'/'+path.relative_to(assets).as_posix()]=path.read_bytes()
+    return package(lock,target,binary,license_bundle,evidence,output,runtime)
 
 def validate_publication(existing, expected):
     if existing is None:
@@ -508,11 +587,11 @@ def publish(directory):
         # 拒绝复用游离 tag，防止发布指向错误配方。
         prior_tag = api(f'repos/{repo}/git/ref/tags/{urllib.parse.quote(tag, safe="")}', missing_ok=True)
         require(prior_tag is None, '发布 tag 已存在但没有可恢复 Draft')
-        notes = (f'mGBA {lock["source"]["version"]}（正式源码 {lock["source"]["sha"]}）\n\n'
+        notes = (f'{core_name()} {lock["source"]["version"]}（正式源码 {lock["source"]["sha"]}）\n\n'
                  f'Continue Cart {lock["cart_version"]}；原生 ABI 检查通过，未进行 ROM/图像/音频/性能验收。\n'
                  '三个目标、源码与全部校验材料先收齐，再公开。详见 release-report.json 与 SOURCE.md。')
         existing = api(f'repos/{repo}/releases', 'POST', {'tag_name':tag, 'target_commitish':lock['recipe']['commit'],
-                      'name':f'mGBA {lock["source"]["version"]} / Cart {lock["cart_version"]}',
+                      'name':f'{core_name()} {lock["source"]["version"]} / Cart {lock["cart_version"]}',
                       'body':notes, 'draft':True, 'prerelease':'-' in lock['cart_version']})
     for name in missing:
         run(['gh', 'release', 'upload', tag, directory/name, '--repo', repo])
@@ -527,10 +606,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     check = sub.add_parser('check')
-    check.add_argument('core', choices=['mgba'])
+    check.add_argument('core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
     check.add_argument('--output', default='candidate.json')
     prep = sub.add_parser('prepare')
-    prep.add_argument('core', choices=['mgba'])
+    prep.add_argument('core', choices=sorted(p.stem for p in (ROOT/'registry').glob('*.json')))
     prep.add_argument('version')
     prep.add_argument('--cart-version')
     prep.add_argument('--output', default='input-lock.json')
@@ -543,6 +622,11 @@ def main():
         p.add_argument('directory')
     args = parser.parse_args()
     try:
+        if args.command in ('check','prepare'):
+            select_core(args.core)
+        else:
+            path=Path(args.input_lock) if args.command=='build' else Path(args.directory)/'input-lock.json'
+            activate_lock(json.loads(path.read_text()))
         if args.command == 'check':
             adopted = published_sources()
             candidate = select_candidate(pages(f'repos/{REGISTRY["upstream_repo"]}/releases'), adopted, resolve_tag)

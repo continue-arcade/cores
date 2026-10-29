@@ -1,12 +1,21 @@
 name: Core release
 on:
-  schedule:
-    - cron: '23 5 * * *'
   workflow_dispatch:
+    inputs:
+      core:
+        description: 已登记 Core
+        type: choice
+        options: [mgba, mesen, bsnes, ppsspp]
+        default: mgba
+  workflow_call:
+    inputs:
+      core:
+        type: string
+        required: true
 permissions:
   contents: read
 concurrency:
-  group: core-release
+  group: core-release-${{ inputs.core }}
   cancel-in-progress: false
 jobs:
   check:
@@ -19,14 +28,16 @@ jobs:
       - run: mise run test
       - id: check
         env:
+          CORE: ${{ inputs.core }}
           GH_TOKEN: ${{ github.token }}
-        run: mise run core-release -- check mgba
+        run: mise run core-release -- check "$CORE"
       - if: steps.check.outputs.update == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          CORE: ${{ inputs.core }}
           CORE_VERSION: ${{ steps.check.outputs.version }}
           CART_VERSION: ${{ steps.check.outputs.cart_version }}
-        run: mise run core-release -- prepare mgba "$CORE_VERSION" --cart-version "$CART_VERSION"
+        run: mise run core-release -- prepare "$CORE" "$CORE_VERSION" --cart-version "$CART_VERSION"
       - if: steps.check.outputs.update == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -58,6 +69,8 @@ jobs:
         run: |
           echo 'CC=gcc-13' >> "$GITHUB_ENV"
           echo 'CXX=g++-13' >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgl1-mesa-dev libegl1-mesa-dev
       - name: Windows toolchain
         if: runner.os == 'Windows'
         shell: pwsh
@@ -65,9 +78,15 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'WindowsSdkDir')) {
+          foreach ($name in @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCToolsInstallDir', 'WindowsSdkDir', 'VSINSTALLDIR')) {
             "$name=$([Environment]::GetEnvironmentVariable($name))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
+      - name: GNU make and MinGW for upstream Make recipes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & C:/msys64/usr/bin/bash.exe -lc 'pacman -S --noconfirm --needed make mingw-w64-x86_64-gcc'
+          'C:/msys64/usr/bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build and native ABI verification
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,69 @@
+{
+  "release_repo": "continue-arcade/cores",
+  "targets": [
+    "macos-aarch64",
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "recipe_revision": 1,
+  "cmake_options": {
+    "LIBRETRO": "ON",
+    "USING_QT_UI": "OFF",
+    "HEADLESS": "OFF",
+    "USE_DISCORD": "OFF",
+    "USE_MINIUPNPC": "OFF",
+    "USE_SYSTEM_FFMPEG": "OFF",
+    "USE_SYSTEM_LIBZIP": "OFF",
+    "USE_SYSTEM_LIBPNG": "OFF",
+    "USE_SYSTEM_ZSTD": "OFF",
+    "USE_SYSTEM_SNAPPY": "OFF",
+    "USE_SYSTEM_ZLIB": "OFF",
+    "USE_SYSTEM_SDL2": "OFF",
+    "USE_WAYLAND_WSI": "OFF",
+    "USE_X11_VULKAN": "OFF",
+    "VULKAN": "OFF",
+    "UNITTEST": "OFF",
+    "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+    "CMAKE_BUILD_TYPE": "Release",
+    "ATLAS_TOOL": "OFF",
+    "USE_SYSTEM_LIBSDL2": "ON",
+    "USING_X11_VULKAN": "OFF",
+    "USE_SYSTEM_LIBCHDR": "OFF"
+  },
+  "upstream_repo": "hrydgard/ppsspp",
+  "bootstrap": {
+    "tag": "v1.20.4",
+    "sha": "fa50bb1976065c4f8b1b47af227d367fe9771555",
+    "cart_version": "0.1.0-smoke.1"
+  },
+  "name": "PPSSPP",
+  "author": "PPSSPP Contributors",
+  "license": "GPL-2.0-or-later",
+  "license_marker": "GNU GENERAL PUBLIC LICENSE",
+  "tag_pattern": "^v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$",
+  "builder": "ppsspp",
+  "platforms": [
+    "psp"
+  ],
+  "license_files": [
+    "LICENSE.TXT"
+  ],
+  "required_source_files": [
+    "LICENSE.TXT",
+    "CMakeLists.txt",
+    "libretro/libretro.cpp",
+    "assets/compat.ini"
+  ],
+  "abi_name": "PPSSPP",
+  "submodules": true,
+  "runtime_assets": {
+    "source": "assets",
+    "destination": "system/PPSSPP"
+  },
+  "required_runtime_assets": [
+    "compat.ini",
+    "flash0/font",
+    "ppge_atlas.zim",
+    "ppge_atlas.meta"
+  ]
+}

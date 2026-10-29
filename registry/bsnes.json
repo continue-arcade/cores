@@ -1,0 +1,36 @@
+{
+  "release_repo": "continue-arcade/cores",
+  "targets": [
+    "macos-aarch64",
+    "windows-x86_64",
+    "linux-x86_64"
+  ],
+  "recipe_revision": 1,
+  "cmake_options": {},
+  "upstream_repo": "bsnes-emu/bsnes",
+  "bootstrap": {
+    "tag": "v115",
+    "sha": "8e80d2f8a43e34a82931e25143b279e5fbcfaedc",
+    "cart_version": "0.1.0-smoke.1"
+  },
+  "name": "bsnes",
+  "author": "bsnes Contributors",
+  "license": "GPL-3.0-only",
+  "license_marker": "GNU GENERAL PUBLIC LICENSE",
+  "tag_pattern": "^v(0|[1-9]\\d*)$",
+  "builder": "bsnes",
+  "platforms": [
+    "snes"
+  ],
+  "license_files": [
+    "GPLv3.txt",
+    "LICENSE.txt"
+  ],
+  "required_source_files": [
+    "LICENSE.txt",
+    "GPLv3.txt",
+    "bsnes/target-libretro/libretro.cpp",
+    "bsnes/GNUmakefile"
+  ],
+  "abi_name": "bsnes"
+}
