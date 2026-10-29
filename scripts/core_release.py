@@ -467,7 +467,7 @@ def native_dependencies(binary, target):
         listing = run(['ldd', binary])
         require('not found' not in listing, 'Linux 动态依赖缺失')
         names = [line.strip().split()[0] for line in listing.splitlines() if line.strip()]
-        allowed = re.compile(r'^(linux-vdso|lib(c|m|pthread|dl|rt|gcc_s|gomp|stdc\+\+|GL|GLX|GLdispatch|OpenGL|X11|Xext|xcb|Xau|Xdmcp|bsd|md)\.so|/lib\S*/ld-linux)')
+        allowed = re.compile(r'^(linux-vdso|lib(c|m|z|pthread|dl|rt|gcc_s|gomp|stdc\+\+|GL|GLX|GLdispatch|OpenGL|X11|Xext|xcb|Xau|Xdmcp|bsd|md)\.so|/lib\S*/ld-linux)')
         require(all(allowed.match(n) for n in names), 'Linux 非预期动态依赖: ' + listing)
         return listing
     listing = run(['dumpbin', '/dependents', binary])
